@@ -1,0 +1,6 @@
+Simple table-driven lexer in Erlang.
+
+Advantage: generate and run your lexer on the fly. See lex.erl for some examples.
+lex:with(Rules, String) is the easiest entrypoint.
+
+Drawbacks: lexing errors not very legible.
