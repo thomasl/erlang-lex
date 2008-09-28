@@ -151,12 +151,13 @@
 %%   milliseconds on my 1.6 GHz laptop
 %%
 %% *** UNFINISHED ***
-%% - only handles UTF-8 (or rather, "8-bit ASCII"), will require
-%%   a rewrite to handle larger charsets
+%% - only handles 8-bit ASCII, will require a rewrite to handle larger charsets
 %%   * curr. table requires about (s * c) words, where s is the number
 %%     of states and c the number of characters
 %%     = for 100 states and 65K characters, we get a table of about 26 MB
 %%       which is normally impractical
+%%     = using dict or equivalent slows down every state access, so
+%%       we need an optimized final representation
 %%   * curr. lex drivers work one byte at a time -- they will have to
 %%     be rewritten to munch 1 character at a time (this is probably
 %%     straightforward)

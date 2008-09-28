@@ -1,0 +1,8 @@
+Tasks to extend and improve the lexer:
+
+1. Extend the regexp input language
+
+2. Add more drivers, and refactor them into separate modules. Better error handling
+   in the drivers. (NB. these drivers are just erlang functions, not actual C drivers.)
+
+3. More examples.
