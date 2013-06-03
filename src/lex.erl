@@ -267,7 +267,7 @@ regexp_to_internal(N, {regexp, Regexp_str, Action}) ->
     Prio = 0,
     {regexp, N, parse_regexp(Regexp_str), Action, Prio};
 regexp_to_internal(N, {regexp, Prio, Regexp_str, Action}) 
-  when integer(Prio), Prio >= 0 ->
+  when is_integer(Prio), Prio >= 0 ->
     {regexp, N, parse_regexp(Regexp_str), Action, Prio}.
     
 %% ?max_char is currently used to decide the "charset size"
@@ -298,6 +298,9 @@ regexp_to_internal(N, {regexp, Prio, Regexp_str, Action})
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
+%% *** UNFINISHED ***
+%% - OBSOLETED BY R15 ... geez
+%%
 %% We currently handle a SUBSET of the regexps of Erlang/OTP:s regexp
 %% matching (regexp(3)), a subset of AWKs.
 %%
@@ -319,13 +322,16 @@ regexp_to_internal(N, {regexp, Prio, Regexp_str, Action})
 %% bos                   "beginning of string", ^
 %% eos                   "end of string", $
 
+% parse_regexp(Regexp) ->
+%    exit({obsoleted_by_r15, Regexp}).
+
 parse_regexp(Regexp) ->
-    case regexp:parse(Regexp) of
-	{ok, RE} ->
-	    internal_form(RE);
-	Err ->
-	    exit(Err)
-    end.
+   case regexp:parse(Regexp) of
+ 	{ok, RE} ->
+ 	    internal_form(RE);
+ 	Err ->
+ 	    exit(Err)
+     end.
 
 %% Convert to internal form
 %%
@@ -346,9 +352,10 @@ internal_form({comp_class, Char_ranges}) ->
     flatten_disj(complement_char_ranges(?min_char, ?max_char, Char_ranges));
 internal_form({concat, RE1, RE2}) ->
     flatten_seq([internal_form(RE1), internal_form(RE2)]);
-internal_form({From, To}) when integer(From), integer(To), From =< To ->
+internal_form({From, To}) 
+  when is_integer(From), is_integer(To), From =< To ->
     {range, From, To};
-internal_form(N) when integer(N) ->
+internal_form(N) when is_integer(N) ->
     {range, N, N};
 internal_form({pclosure, RE}) ->
     RegExp = internal_form(RE),
@@ -356,9 +363,10 @@ internal_form({pclosure, RE}) ->
 internal_form(Other) ->
     exit({regexp_not_handled, Other}).
 
-internal_range({From, To}) when integer(From), integer(To), From =< To ->
+internal_range({From, To}) 
+  when is_integer(From), is_integer(To), From =< To ->
     {range, From, To};
-internal_range(N) when integer(N) ->
+internal_range(N) when is_integer(N) ->
     {range, N, N}.
 
 %% Convert a complemented range into a non-complemented one
@@ -373,7 +381,7 @@ complement(MinChar, MaxChar, Ranges) ->
 
 sort_distinct_ranges(Ranges) ->
     lists:sort(
-      fun({range, From0, To0}, {range, From1, To1}) ->
+      fun({range, From0, _To0}, {range, From1, _To1}) ->
 	      From0 < From1
       end,
       Ranges
@@ -504,7 +512,7 @@ regexps_to_nfa(Regexps) ->
 
 init_accepting_states(Regexps) ->
     lists:mapfoldl(
-      fun({regexp, AccID, Regexp, Action, Prio}, FA0) ->
+      fun({regexp, AccID, _Regexp, _Action, Prio}, FA0) ->
 	      add_accepting_state(AccID, Prio, [], FA0)
       end,
       empty_fa(),
@@ -515,7 +523,7 @@ init_accepting_states(Regexps) ->
 
 nfa_states(Regexps, AccStates, FA1) ->
     lists:mapfoldl(
-      fun({{regexp, AccID, Regexp, Action, Prio}, AccState}, FA_in) ->
+      fun({{regexp, _AccID, Regexp, _Action, _Prio}, AccState}, FA_in) ->
 	      regexp_to_nfa(Regexp, AccState, FA_in)
       end,
       FA1,
@@ -682,8 +690,10 @@ lub_acceptance(non_accepting, X) ->
     X;
 lub_acceptance(X, non_accepting) ->
     X;
-lub_acceptance({accepting, Rule1, Prio1}, {accepting, Rule2, Prio2}) 
+lub_acceptance({accepting, Rule1, Prio1}, {accepting, Rule2, _Prio2}) 
   when Rule1 == Rule2 ->
+    %% *** CHECK ***
+    %% - should Prio2 be used?
     {accepting, Rule1, Prio1};
 lub_acceptance({accepting, Rule1, Prio1}, {accepting, Rule2, Prio2}) 
   when Rule1 =/= Rule2 ->
@@ -731,7 +741,7 @@ ranges_to_set_form(Ranges0) ->
 
 convert_to_set_form({range, From, To, Next}) ->
     {From, To, singleton(Next)};
-convert_to_set_form({epsilon, Next}) ->
+convert_to_set_form({epsilon, _Next}) ->
     %% discarded when list flattened
     [].
 
@@ -959,13 +969,13 @@ generate_table(DFA) ->
 %% each row is the transition function for the corresponding state,
 %% a tuple of ?maxchar elements
 
-generate_row({ID, {state, Acc, Succs}}) ->
+generate_row({_ID, {state, _Acc, Succs}}) ->
     list_to_tuple(ranges_to_list(sort_successors(Succs))).
 
 sort_successors(Succs) ->
     Sorts =
 	lists:sort(
-	  fun({range, From0, To0, St0}, {range, From1, To1, St1}) ->
+	  fun({range, From0, _To0, _St0}, {range, From1, _To1, _St1}) ->
 		  From0 < From1
 	  end,
 	  Succs
@@ -1026,7 +1036,7 @@ group_accepting_states(FA) ->
 
 rename_map([ID|IDs], NewID) ->
     [{ID, NewID} | rename_map(IDs, NewID+1)];
-rename_map([], NewID) ->
+rename_map([], _NewID) ->
     [].
 
 %% create a new FA with renamed states
@@ -1051,11 +1061,11 @@ rename_states(Map, FA) ->
 rename_state(X, Map) ->
     rename_state(X, Map, Map).
 
-rename_state(X, [{X, Y}|_], Map) ->
+rename_state(X, [{X, Y}|_], _Map) ->
     Y;
-rename_state(X, [_|Xs], Map) ->
+rename_state(X, [_|Xs], _Map) ->
     rename_state(X, Xs);
-rename_state(X, [], Map) ->
+rename_state(_X, [], Map) ->
     exit({state_not_found, Map}).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -1080,17 +1090,18 @@ rename_state(X, [], Map) ->
 %%
 %% A sequence is a string (list of char) or a binary
 
-longest(Lex, Seq) when binary(Seq) ->
+longest(Lex, Seq) when is_binary(Seq) ->
     longest_bin(Lex, Seq, start_pos());
-longest(Lex, {Bin, Pos}) when binary(Bin), integer(Pos), Pos >= ?least_pos ->
+longest(Lex, {Bin, Pos}) 
+  when is_binary(Bin), is_integer(Pos), Pos >= ?least_pos ->
     longest_bin(Lex, Bin, Pos);
-longest(Lex, Seq) when list(Seq) ->
+longest(Lex, Seq) when is_list(Seq) ->
     longest_string(Lex, Seq).
 
 %% Longest match applied to string (list of chars)
 
 longest_string({lex, Start, AcceptLimit, Table, Actions}, String) 
-  when list(String) -> 
+  when is_list(String) -> 
     no_lines(),
     longest_string(Start, Table, AcceptLimit, Actions, String).
 
@@ -1113,8 +1124,11 @@ longest_string(Start, Table, AcceptLimit, Actions, String) ->
 %% If we enter an accepting state, then go to accept
 %%
 %% Otherwise, keep going in pre_acc.
+%%
+%% *** UNFINISHED ***
+%% - parameter State is dead? or something missing?
 
-pre_accept([C|Cs], Acc, State, Nxt, Table, AcceptLimit, Start, Actions) ->
+pre_accept([C|Cs], Acc, _State, Nxt, Table, AcceptLimit, Start, Actions) ->
     case next_state(C, Nxt) of
 	?no_match ->
 	    %% no match possible, fail
@@ -1129,7 +1143,7 @@ pre_accept([C|Cs], Acc, State, Nxt, Table, AcceptLimit, Start, Actions) ->
 	    pre_accept(Cs, acc(C, Acc), N, NewNxt, 
 		    Table, AcceptLimit, Start, Actions)
     end;
-pre_accept("", Acc, State, Nxt, Table, AcceptLimit, Start, Actions) ->
+pre_accept("", Acc, _State, _Nxt, _Table, _AcceptLimit, _Start, _Actions) ->
     %% no match
     {no_match, lists:reverse(Acc), ""}.
 
@@ -1176,7 +1190,7 @@ accept([C|Cs]=Lst, Acc, AccSt, State, Nxt,
 			N, NewNxt,
 			Table, AcceptLimit, Start, Actions)
     end;
-accept("", Acc, AccSt, State, Nxt, Table, AcceptLimit, Start, Actions) ->
+accept("", Acc, _AccSt, State, _Nxt, _Table, _AcceptLimit, _Start, Actions) ->
     %% no more to lex and we are in an accepting state => emit token
     %% and end
     case emit_token(Actions, State, Acc) of
@@ -1196,7 +1210,7 @@ accept("", Acc, AccSt, State, Nxt, Table, AcceptLimit, Start, Actions) ->
 %%
 %% Otherwise, keep going.
 
-post_accept([C|Cs]=Lst, Acc, AccSt, State, Nxt, 
+post_accept([C|Cs]=_Lst, Acc, AccSt, _State, Nxt, 
 	    Table, AcceptLimit, Start, Actions) ->
     case next_state(C, Nxt) of
 	?no_match ->
@@ -1220,7 +1234,8 @@ post_accept([C|Cs]=Lst, Acc, AccSt, State, Nxt,
 	    post_accept(Cs, acc(C, Acc), AccSt, N, NewNxt,
 			Table, AcceptLimit, Start, Actions)
     end;
-post_accept("", Acc, AccSt, State, Nxt, Table, AcceptLimit, Start, Actions) ->
+post_accept("", _Acc, AccSt, _State, _Nxt, Table, 
+	    AcceptLimit, Start, Actions) ->
     %% no more matching, reset to saved token and continue from there
     {State0, Acc0, Cs0} = reset_match(AccSt),
     case emit_token(Actions, State0, Acc0) of
@@ -1274,7 +1289,7 @@ reset_match({match, State, Acc, Cs}) ->
 %% - does not permit incremental lexing
 
 %% not used, except for testing:
-longest_bin(Lex, Bin) when binary(Bin) ->
+longest_bin(Lex, Bin) when is_binary(Bin) ->
     Pos = start_pos(),
     longest_bin(Lex, Bin, Pos).
 
@@ -1312,8 +1327,9 @@ longest_bin(Start, Table, AcceptLimit, Actions, Bin, Pos) ->
 %%   but we should also permit just positions to be stored
 %%   for extra speed
 %% - incremental lexing not handled (curr_char not_found => "partial state")
+%% - _State dead?
 
-pre_accept_bin(Bin, Pos, Acc, State, Nxt, 
+pre_accept_bin(Bin, Pos, Acc, _State, Nxt, 
 	       Table, AcceptLimit, Start, Actions) ->
     case curr_char(Bin, Pos) of
 	not_found ->
@@ -1389,8 +1405,11 @@ accept_bin(Bin, Pos, Acc, AccSt, State, Nxt,
 
 %% @see post_accept/9 for most arguments; Bin and Pos is the binary
 %% and the position in the binary
+%%
+%% *** UNFINISHED ***
+%% - State dead?
 
-post_accept_bin(Bin, Pos, Acc, AccSt, State, Nxt,
+post_accept_bin(Bin, Pos, Acc, AccSt, _State, Nxt,
 		Table, AcceptLimit, Start, Actions) ->
     case curr_char(Bin, Pos) of
 	not_found ->
@@ -1486,7 +1505,7 @@ action_table(Regexp_rules, DFA, AcceptLimit) ->
 regexp_actions(Regexp_rules) ->
     dict:from_list(
       [ {ID, the_action(Action)} 
-	|| {regexp, ID, Regexp_str, Action, Prio} <- Regexp_rules ]
+	|| {regexp, ID, _Regexp_str, Action, _Prio} <- Regexp_rules ]
      ).
 
 %% for accepting states (1..AcceptLimit), get the corresponding Action
@@ -1496,14 +1515,14 @@ regexp_actions(Regexp_rules) ->
 state_actions(AcceptLimit, DFA, Actions) ->
     list_to_tuple(
       [ begin
-	    {state, {accepting, R, Prio}, Succ} = state(St, DFA),
+	    {state, {accepting, R, _Prio}, _Succ} = state(St, DFA),
 	    rule_action(Actions, R)
 	end || St <- lists:seq(1, AcceptLimit) ]
      ).
 
 %%
 
-the_action(Fun) when function(Fun) ->
+the_action(Fun) when is_function(Fun) ->
     Fun;
 the_action(A) ->
     fun(Acc) ->
@@ -1608,11 +1627,11 @@ successors(ID, FA) ->
 %%
 
 accepting_state(ID, FA) ->
-    {state, Acc, Succs} = state(ID, FA),
+    {state, Acc, _Succs} = state(ID, FA),
     case Acc of
 	non_accepting ->
 	    false;
-	{accepting, Rule, Prio} ->
+	{accepting, _Rule, _Prio} ->
 	    true
     end.
 
@@ -1666,7 +1685,7 @@ set_fa_state(ID, State, FA) ->
 %% Update successors of state to new list
 
 update_fa_successors(ID, NewSuccs, FA) ->
-    {state, Acc, OldSuccs} = fa_state(ID, FA),
+    {state, Acc, _OldSuccs} = fa_state(ID, FA),
     NewState = {state, Acc, NewSuccs},
     FA#fa{states=dict:store(ID, NewState, FA#fa.states)}.
 
@@ -1775,7 +1794,7 @@ empty_pre_dfa() ->
 name_dfa_state(StateSet, {Next, State_names, DFA_states}) ->
     {Next, {Next+1, dict:store(StateSet, Next, State_names), DFA_states}}.
 
-states_present(StateSet, {Next, State_names, DFA_states}) ->
+states_present(StateSet, {_Next, State_names, _DFA_states}) ->
     case dict:find(StateSet, State_names) of
 	{ok, Name} ->
 	    {found, Name};
@@ -1792,10 +1811,10 @@ pre_dfa_to_list({Next, State_names, DFA_states}) ->
 pre_dfa_state_names_list(Pre_DFA) ->
     dict:to_list(pre_dfa_state_names(Pre_DFA)).
 
-pre_dfa_state_names({Next, State_names, DFA_states}) ->
+pre_dfa_state_names({_Next, State_names, _DFA_states}) ->
     State_names.
 
-pre_dfa_to_dfa(Start, {Next, State_names, DFA_states}=Pre_DFA) ->
+pre_dfa_to_dfa(Start, {Next, _State_names, DFA_states}=_Pre_DFA) ->
     #fa{next=Next,
 	start_state=Start,
 	states=DFA_states}.
@@ -1842,7 +1861,7 @@ insert(Item, [X|Xs]) ->
 
 insert_before(Item, [X|Xs]) ->
     [Item,X|insert_before(Item,Xs)];
-insert_before(Item, []) ->
+insert_before(_Item, []) ->
     [].
 
 test(1, String) ->
@@ -2092,7 +2111,7 @@ item(Key) ->
 %%
 
 op(Key) ->
-    fun(Acc) ->
+    fun(_Acc) ->
 	    {token, {op, lex:current_line(), Key}}
     end.
 
@@ -2128,7 +2147,7 @@ char() ->
 %% perhaps {token, {Key, current_line()}}?
 	
 token(Key) ->    
-    fun(Acc) ->
+    fun(_Acc) ->
 	    {token, Key}
     end.
 
@@ -2142,7 +2161,7 @@ no_token() ->
 %%
 
 comment() ->
-    fun(Acc) ->
+    fun(_Acc) ->
 	    %% io:format("comment '~s'~n", [lists:reverse(Acc)]),
 	    no_token
     end.
@@ -2150,8 +2169,8 @@ comment() ->
 %%
 
 whitespace() ->
-    fun(Acc) ->
-	    %% io:format("whitespace '~s'~n", [lists:reverse(Acc)]),
+    fun(_Acc) ->
+	    %% io:format("whitespace '~s'~n", [lists:reverse(_Acc)]),
 	    no_token
     end.
 
