@@ -18,7 +18,10 @@
 %%
 %%
 %% thomasl note:
-%% - salvaged the regexp parser from regexp.erl obsoleted by R15
+%% - salvaged the original regexp parser from regexp.erl (obsoleted by R15)
+%%
+%% *** UNFINISHED ***
+%% - extend it to handle UTF-8 literals
 
 -module(regexp_parse).
 -export([string/1, format_error/1]).

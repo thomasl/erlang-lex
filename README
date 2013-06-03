@@ -1,6 +1,29 @@
 Simple table-driven lexer in Erlang.
 
-Advantage: generate and run your lexer on the fly. See lex.erl for some examples.
-lex:with(Rules, String) is the easiest entrypoint.
+Works by building an NFA given the rules, then converting the NFA
+into a DFA. If multiple rules can match, a priority can be specified.
+Ambiguous matches yield compile-time errors.
 
-Drawbacks: lexing errors not very legible.
+Note: building a lex table requires about 50ms, so it's possible to
+just do it dynamically if the lexing task is substantial.
+
+Advantage: generate and run your lexer on the fly. See lex.erl for
+some examples.  lex:with(Rules, String) is the easiest entrypoint.
+
+Drawbacks: lexing errors currently not very legible.
+
+TODO:
+- better error messages, at compile time and runtime
+- better support for incremental lexing
+- better support lib for writing lexers
+- allow UTF-8 literals and text in regexps
+  * regexp_parse has to be extended
+  * possibly also matching characters, if needed (in particular, matching
+    one character = a valid sequence of UTF-8 bytes)
+- allow full UTF-8, character classes, etc.
+- code generation
+  * emit a table as a constant data structure, and the lex driver with it,
+    and a suitable API
+  * maybe: emit leex-style full code for the lexer using the table
+    - worth checking which is faster and smaller
+  * easier to distribute than being required to use erlang-lex
