@@ -322,16 +322,16 @@ regexp_to_internal(N, {regexp, Prio, Regexp_str, Action})
 %% bos                   "beginning of string", ^
 %% eos                   "end of string", $
 
-% parse_regexp(Regexp) ->
-%    exit({obsoleted_by_r15, Regexp}).
-
 parse_regexp(Regexp) ->
-   case regexp:parse(Regexp) of
- 	{ok, RE} ->
- 	    internal_form(RE);
- 	Err ->
- 	    exit(Err)
-     end.
+   exit({obsoleted_by_r15, Regexp}).
+
+% parse_regexp(Regexp) ->
+%    case regexp:parse(Regexp) of
+%  	{ok, RE} ->
+%  	    internal_form(RE);
+%  	Err ->
+%  	    exit(Err)
+%      end.
 
 %% Convert to internal form
 %%
