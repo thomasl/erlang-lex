@@ -1,11 +1,10 @@
-# ERLC_FLAGS += -pa ../ebin
-
-# ok, a bit clumsy
+ERLC=erlc
+ERLC_OPTS=+export_all -o ../ebin
 
 all: ../ebin/lex.beam
 
-../ebin/lex.beam:
-	erlc -o ../ebin lex.erl
+../ebin/%.beam: %.erl
+	$(ERLC) $(ERLC_OPTS) $<
 
 clean:
 	-rm -f ../ebin/*
