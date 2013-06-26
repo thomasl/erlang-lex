@@ -17,11 +17,11 @@
 %% %CopyrightEnd%
 %%
 %%
-%% thomasl note:
+%% thomasl notes:
 %% - salvaged the original regexp parser from regexp.erl (obsoleted by R15)
-%%
-%% *** UNFINISHED ***
-%% - extend it to handle UTF-8 literals
+%% - conversion from unicode to UTF-8 is a bit unintuitive, and needs to
+%%   be tested in some real situation (for example, what is actually submitted
+%%   when we use this? Latin-1? UTF-8? Unicode?)
 
 -module(regexp_parse).
 -export([string/1, format_error/1]).
@@ -41,7 +41,22 @@
       RE :: regexp(),
       Error :: errordesc().
 
-string(S) ->
+%% thomasl - convert the regexp from unicode to UTF-8 before
+%%  parsing
+%%
+%% *** UNFINISHED ***
+%% - Need to investigate how this really works:
+%%   in the toploop, we input 2 chinese chars and get
+%%    6> X = "æ é". 
+%%    [32,38395]
+%%   and so on with more chars (note that this looks different in my emacs,
+%%   perhaps because it's still interpreted as Latin-1?)
+%%   But ... strings should be UTF-8 according to the docs.
+%% - For future use, to fully handle unicode we need character classes and
+%%   operations that match 1 "char" = multiple bytes
+
+string(S0) ->
+    S = binary_to_list(unicode:characters_to_binary(S0)),
     case catch reg(S) of
 	{R,[]} -> {ok,R};
 	{_R,[C|_]} -> {error,{illegal,[C]}};
