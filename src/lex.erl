@@ -186,11 +186,12 @@
 %% some finer details also remain to be addressed:
 %% - what if {seq, []}? (never happens, normally)
 %% - what if {disj, []}? (dito)
-%% - unicode vs 7b ascii vs 8b ascii vs ...? hmm
-%%   * "lexing chinese"?
-%%   * the current table structure probably is insufficient for large
-%%     character sets; it should be possible to move to something less
-%%     direct
+%% - lexing UTF8 (as defined in RFC 3629)
+%%   1. characters are multibyte, UTF-8 when N > 127 (non-ASCII)
+%%      + detect malformed UTF8
+%%   2. handle UTF8 literals, translate to appropriate byte sequence
+%%      (perl also has character classes and whatnot, do we need to do that?)
+%%   3. any other unicode gotchas to handle?
 
 -module(lex).
 -author('thomasl_erlang@yahoo.com').
