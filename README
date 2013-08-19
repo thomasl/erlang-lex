@@ -1,5 +1,8 @@
 Simple table-driven lexer in Erlang.
 
+(Note: this is an experimental branch for supporting UTF8 rather
+than ASCII. See README.UTF8 for further discussion.)
+
 Works by building an NFA given the rules, then converting the NFA
 into a DFA. If multiple rules can match, a priority can be specified.
 Ambiguous matches yield compile-time errors.
