@@ -1,0 +1,44 @@
+
+Changes needed to support Unicode/UTF8
+
+Assumptions:
+- reasonably simple support only
+- only handle UTF8, not UTF16, UTF32, etc
+- should be a pure extension of conventional/ASCII lex.
+- FIRST support these in the term format of lex specifications, THEN in
+  the text format.
+
+Required Extensions:
+
+1- Support UTF8 literals. These should probably be translated into Unicode
+   codepoints, then handled as below.
+
+2- Support UTF8 in regexps, e.g., ranges. This should probably be translated
+   into Unicode codepoints, then handled as below.
+
+3- Support Unicode raw codepoints to specify ranges. These are converted
+   into UTF8 sequences by the lex translator.
+
+4- Support any-character taking UTF8 entities rather than just bytes. This
+   should be translated into byte sequences.
+
+5- Scanner execution support. Check whether any special support is needed
+   to scan UTF8. Lex should be able to maintain existing data structures
+   if we can translate all into "scan byte at a time".
+
+This suggests a two step process:
+(a) translate term regexps with unicode into term regexps using UTF8
+(b) translate term regexps using UTF8 into term regexps using bytes
+
+Bells and whistles:
+
+- Specify character classes instead of ranges. Classes are more
+  natural and general to the user than ranges, though they rely on
+  someone defining them. Classes should be compiled into term regexps
+  by the translator. [Note that e.g. perl supports classes for ASCII.]
+
+- Textual format for regexps with unicode etc. This requires a more
+  sophisticated parser than the obsolete re.erl parser. Full requirements
+  are unclear, first finish the extension of term based regexps.
+
+
