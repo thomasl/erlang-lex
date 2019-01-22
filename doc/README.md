@@ -10,12 +10,12 @@ according to regexp rules.
 
 # USAGE:
 
-'''
+````erlang
   lex:with([Regexp_rule], Sequence) -> [Token]
     Regexp_rule is same as for regexps_to_table/2
   lex:file_with([Regexp_rule], File) -> [Token]
     As above but lexes a whole file.
-'''
+````
 
 A sequence is a list of characters, a binary, or a pair of binary
 and position. Positions are an abstract datatype, see `start_pos/0`
@@ -24,10 +24,10 @@ yourself.)
 
 ## EXAMPLES
 
-'''
+```èrlang
     lex:with(lex:real_erlang_lex(), "foo() -> zap().")
     lex:file_with(lex:real_erlang_lex(), "file.erl")
-'''
+````
 
   For writing your own rules, see `real_erlang_lex()` for a realistic
  example below. The functions it uses to emit tokens and count lines
@@ -35,7 +35,7 @@ yourself.)
 
 ## MORE API:
 
-'''
+```èrlang
   regexps_to_table([{regexp, [Prio,] Regexp_string, Action [,Prio]}]) -> 
                    Lex_table
     where Action(AccToken) -> {token, Token} | no_token
@@ -48,7 +48,7 @@ yourself.)
     where Action(AccToken) -> {token, Token} | no_token
   nfa_to_dfa(NFA) -> DFA
   dfa_to_table(DFA) -> Lex_table
-'''
+````
 
 See also below for help in specifying your lexers.
 
@@ -63,12 +63,14 @@ more characters arrive, you continue.)
 
 We also provide a library for keeping track of the number of lines
 seen so far.
-'''
+
+````erlang
   no_lines()                      reset line count to zero
   inc_lines(), inc_lines(N)       increment line count by 1 or N
   current_line() -> N             returns current line number
   count_lines(Str) -> N           count newlines in string
-'''
+````
+
 The available lex driver sets `no_lines()` before lexing.
 
 Note that the line count is global per-process at this
@@ -76,11 +78,11 @@ time.
 
 Usage in your lexer:
 
-'''
+```èrlang
    {regexp, "\n", fun(_) -> lex:inc_lines(), no_token end}
    {regexp, "...", fun(Acc) -> lex:count_lines(Acc), no_token end}
    {regexp, "<", fun(_) -> {token, {op, lex:current_line(), '<'}} end}
-'''
+```
 
 see also `erlang_lex()` and `real_erlang_lex()` below.
 
@@ -88,30 +90,30 @@ see also `erlang_lex()` and `real_erlang_lex()` below.
 
 Yecc expects the tokenizer to return tuples on the form
 
-'''
+````èrlang
    {Category, LineNumber, Symbol}
    {Category, LineNumber}
-'''
+````
 
 if there is just one member of the `Category`. For example, all operators
 are the same while variables normally are different, so we would return
 something like
 
-'''
+````
    {var, 42, "VarName"}
-'''
+````
 
 or
 
-'''
+````
    {'+', 17}
-'''
+````
 
 Furthermore, the list of tokens should end with
 
-'''
+````
   {End_symbol, LineNumber}
-'''
+````
 
 (where `End_symbol` is declared in the yecc file)
 
