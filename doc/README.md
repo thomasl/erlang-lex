@@ -12,9 +12,9 @@ according to regexp rules.
 
 ````erlang
   lex:with([Regexp_rule], Sequence) -> [Token]
-    Regexp_rule is same as for regexps_to_table/2
+    %% Regexp_rule is same as for regexps_to_table/2
   lex:file_with([Regexp_rule], File) -> [Token]
-    As above but lexes a whole file.
+    %% As above but lexes a whole file.
 ````
 
 A sequence is a list of characters, a binary, or a pair of binary
@@ -140,10 +140,10 @@ See also the example lexer specification in `src/lex.erl`.
 
 No known bugs per se, but some questionable design decisions.
 
-Some missing functionality. In particular, UTF-8 and suchlike is
-not handled. The current way of lexing is not suitable for this -- we
-currently use the equivalent of arrays, which is impractical for huge
-character sets. 
+Some missing functionality. In particular, UTF-8 and suchlike is not
+handled. The current way of lexing is not suitable for this -- we
+currently emit the equivalent of arrays for representing DFA
+transition tables, which is impractical for huge character sets.
 
 To understand the code, you should know about (deterministic
 and nondeterministic) finite automata on the level of the Dragon Book.
