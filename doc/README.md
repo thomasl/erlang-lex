@@ -134,16 +134,23 @@ Furthermore, the list of tokens should end with
 
 It is up to you to return tokens suitable for yecc, but as you can see
 it's not too hard. Line numbers can be added using the library above.
-See also the example lexer specification in `src/lex.erl`.
+See also the example lexer specifications in `src/lex.erl`.
 
 ## STATUS
 
 No known bugs per se, but some questionable design decisions.
 
-Some missing functionality. In particular, UTF-8 and suchlike is not
-handled. The current way of lexing is not suitable for this -- we
-currently emit the equivalent of arrays for representing DFA
-transition tables, which is impractical for huge character sets.
+The error returned when there is no match is incomprehensible. This is
+probably the main usage issue.
+
+Some missing functionality for more modern languages. In particular,
+UTF-8 and suchlike is not handled. The current way of lexing is not
+suitable for this -- we currently emit the equivalent of arrays for
+representing DFA transition tables, which is impractical for huge
+character sets. (The code also assumes byte values rather than wider
+characters, so this would need substantial cleanup.)
+
+See `src/lex.erl` for some further notes on what could be done better.
 
 To understand the code, you should know about (deterministic
 and nondeterministic) finite automata on the level of the Dragon Book.
