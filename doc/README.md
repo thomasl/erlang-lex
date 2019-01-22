@@ -1,7 +1,7 @@
 
 # Erlang-Lex documentation
 
-(This has been collected from the src/lex.erl file.)
+(This has been collected from the `src/lex.erl` file.)
 
 Author: Thomas Lindgren (040422-040425; 041125; 051007-051016)
 
