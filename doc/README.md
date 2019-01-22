@@ -8,7 +8,7 @@ Author: Thomas Lindgren (040422-040425; 041125; 051007-051016)
 Lexical analysis of strings: convert a sequence into a list of tokens
 according to regexp rules.
 
-# USAGE:
+# USAGE
 
 ````erlang
   lex:with([Regexp_rule], Sequence) -> [Token]
@@ -24,28 +24,44 @@ yourself.)
 
 ## EXAMPLES
 
-```èrlang
+````erlang
     lex:with(lex:real_erlang_lex(), "foo() -> zap().")
     lex:file_with(lex:real_erlang_lex(), "file.erl")
 ````
 
-  For writing your own rules, see `real_erlang_lex()` for a realistic
- example below. The functions it uses to emit tokens and count lines
- can often be reused.
+## EXAMPLE REGEXP SPECIFICATIONS
+
+There are two functions that return realistic example specifications
+for lexing. Both are found in `src/lex.erl`.
+
+- `erlang_lex()`
+- `real_erlang_lex()`
+
+## PERFORMANCE
+
+Performance was measured most recently in 2004-2005. 
+
+A lex table for `erlang_lex()` becomes 142 DFA states and is generated
+(from regexps to ready to use) in 54.8 msec on an Athlon 1300+. 
+
+Likewise, `real_erlang_lex()` was generated in 66-68
+milliseconds on a 1.6 GHz laptop.
+
+This is approximately as complex as a programming language lexer gets.
 
 ## MORE API:
 
-```èrlang
+````erlang
   regexps_to_table([{regexp, [Prio,] Regexp_string, Action [,Prio]}]) -> 
                    Lex_table
-    where Action(AccToken) -> {token, Token} | no_token
-          Regexp_string is a regexp according to the regexp module
-          Prio is an integer rule priority (default: 0)
-           that chooses the rule to accept if there are several possible
+    %% where Action(AccToken) -> {token, Token} | no_token
+    %%      Regexp_string is a regexp according to the regexp module
+    %%      Prio is an integer rule priority (default: 0)
+    %%       that chooses the rule to accept if there are several possible
   longest(Lex_table, String) -> [Token]
-     Use a generated lex table to convert a string into a list of tokens.
+    %% Use a generated lex table to convert a string into a list of tokens.
    regexps_to_nfa([{regexp, Regexp_string, Action}]) -> NFA
-    where Action(AccToken) -> {token, Token} | no_token
+    %% where Action(AccToken) -> {token, Token} | no_token
   nfa_to_dfa(NFA) -> DFA
   dfa_to_table(DFA) -> Lex_table
 ````
@@ -65,10 +81,10 @@ We also provide a library for keeping track of the number of lines
 seen so far.
 
 ````erlang
-  no_lines()                      reset line count to zero
-  inc_lines(), inc_lines(N)       increment line count by 1 or N
-  current_line() -> N             returns current line number
-  count_lines(Str) -> N           count newlines in string
+  no_lines()                      %% reset line count to zero
+  inc_lines(), inc_lines(N)       %% increment line count by 1 or N
+  current_line() -> N             %% returns current line number
+  count_lines(Str) -> N           %% count newlines in string
 ````
 
 The available lex driver sets `no_lines()` before lexing.
@@ -76,21 +92,20 @@ The available lex driver sets `no_lines()` before lexing.
 Note that the line count is global per-process at this
 time.
 
-Usage in your lexer:
+Using the line library in your lexer is done like this.
+See also `erlang_lex()` and `real_erlang_lex()`.
 
-```èrlang
+````erlang
    {regexp, "\n", fun(_) -> lex:inc_lines(), no_token end}
    {regexp, "...", fun(Acc) -> lex:count_lines(Acc), no_token end}
    {regexp, "<", fun(_) -> {token, {op, lex:current_line(), '<'}} end}
-```
-
-see also `erlang_lex()` and `real_erlang_lex()` below.
+````
 
 ## YECC COMPATIBILITY
 
 Yecc expects the tokenizer to return tuples on the form
 
-````èrlang
+````erlang
    {Category, LineNumber, Symbol}
    {Category, LineNumber}
 ````
@@ -99,19 +114,19 @@ if there is just one member of the `Category`. For example, all operators
 are the same while variables normally are different, so we would return
 something like
 
-````
+````erlang
    {var, 42, "VarName"}
 ````
 
 or
 
-````
+````erlang
    {'+', 17}
 ````
 
 Furthermore, the list of tokens should end with
 
-````
+````erlang
   {End_symbol, LineNumber}
 ````
 
@@ -123,17 +138,18 @@ See also the example lexer specification in `src/lex.erl`.
 
 ## STATUS
 
-A lex table for `erlang_lex()` becomes 142 DFA states and is generated
-(from regexps to ready to use) in 54.8 msec on my Athlon 1300+
-(written in 2004-2005). This is approximately as complex as a
-programming language lexer gets.
-
 No known bugs per se, but some questionable design decisions.
 
-To understand the code, you should know about (deterministic
-and nondeterministic) finite automata.
+Some missing functionality. In particular, UTF-8 and suchlike is
+not handled. The current way of lexing is not suitable for this -- we
+currently use the equivalent of arrays, which is impractical for huge
+character sets. 
 
-## LEXING PERFORMANCE NOTE
+To understand the code, you should know about (deterministic
+and nondeterministic) finite automata on the level of the Dragon Book.
+It's basically the same algorithms.
+
+## LEXING CORNER CASES
 
  The driver tries to match a maximally long token (aka "maximal munch")
  which means there can be _backtracking_ if a long match ultimately fails.
@@ -158,10 +174,6 @@ and nondeterministic) finite automata.
 - An application: composing collections of regexps is simple, you
   just set their priorities and concatenate => you can easily extend
   your tokenizer dynamically! (just regenerate the lexer)
-- lex generation is fast, `real_erlang_lex()` is generated in 66-68
-   milliseconds on my 1.6 GHz laptop
 
-Note: The performance notes were written in 2005 or earlier so things
-may be faster now.
 
 
