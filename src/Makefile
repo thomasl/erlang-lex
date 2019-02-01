@@ -1,8 +1,6 @@
 ERLC=erlc
 ERLC_OPTS=+export_all -o ../ebin
 
-# There is a make rule for this somewhere...
-
 OBJDIR = ../ebin
 
 SRC := $(wildcard ./*.erl)
