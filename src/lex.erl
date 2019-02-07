@@ -2103,6 +2103,7 @@ quote_char($*) -> "\\*";
 quote_char($?) -> "\\?";
 quote_char($^) -> "\\^";
 quote_char($$) -> "\\$";
+quote_char($.) -> "\\.";
 quote_char($\\) -> "\\\\";
 quote_char($() -> "\\(";
 quote_char($)) -> "\\)";
