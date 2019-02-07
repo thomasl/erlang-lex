@@ -83,14 +83,21 @@
 %% library functions for using the generated lexer
 -export([longest/2]).
 
-%% useful token-related exports
+%% useful token-related exports ("library")
 -export([item/1,
 	 op/1,
 	 token/1,
+	 enclosed_token/2,
+	 enclosed_token/3,
 	 no_token/0,
 	 comment/0,
 	 whitespace/0
 	]).
+
+%% librry function for safely quoting regexp literals that may contain reserved chars
+-export(
+   [safe_literal/1]
+  ).
 
 %% library functions for counting the number of lines
 -export([no_lines/0,
@@ -177,14 +184,12 @@ regexp_to_internal(N, {regexp, Prio, Regexp_str, Action})
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
-%% *** UNFINISHED ***
-%% - OBSOLETED BY R15 ... geez
-%%
 %% We currently handle a SUBSET of the regexps of Erlang/OTP:s regexp
-%% matching (regexp(3)), a subset of AWKs.
+%% matching (regexp(3)), which is a subset of AWKs.
+%%  [Perhaps we should handle a subset of the regexps of Unix lex/flex?]
 %%
 %% c       char c
-%% \c      escaped c
+%% \c      escaped c [note! when inside string "\\c", this is a common case)
 %% .       any char
 %% ^       beginning of string
 %% $       end of string
@@ -209,10 +214,11 @@ parse_regexp(Regexp) ->
   	    exit(Err)
     end.
 
-%% Convert to internal form
+%% Convert to internal form. 
 %%
 %% *** UNFINISHED ***
 %% - does not handle beginning/end of string
+%% - (why do we have two internal forms?)
 
 internal_form({kclosure, RE}) ->
     {iter, internal_form(RE)};
@@ -591,6 +597,9 @@ lub_acceptance({accepting, Rule1, Prio1}, {accepting, Rule2, Prio2})
 			%% can never happen (handled by previous clauses)
 			{Rule1, Prio1, Rule2}
 		end,
+	    %% *** UNFINISHED ***
+	    %% - unreadable to users, should be more informative
+	    %%   (can we print the rule definition?)
 	    warning(
 	      "both ~w and ~w can be accepted at once,"
 	      " ~w shadowed~n", 
@@ -2029,6 +2038,35 @@ token(Key) ->
 
 %%
 
+enclosed_token(Char, Tag) ->
+    fun(Acc) ->
+	    Str = drop_required_quote(Char, Acc),
+	    {token, {Tag, Str}}
+    end.
+
+%%
+
+enclosed_token(StartChar, EndChar, Tag) ->
+    fun(Acc) ->
+	    Str = drop_required_quote(StartChar, EndChar, Acc),
+	    {token, {Tag, Str}}
+    end.
+
+%% Char is an enclosing citation mark that must start and end the string.
+%% The first version assumes the common case when start and end are the same
+%% character.
+%%
+%% If string does not start/end properly, will fail with uninformative error
+
+drop_required_quote(Char, Acc) ->
+    drop_required_quote(Char, Char, Acc).
+
+drop_required_quote(StartChar, EndChar, [EndChar|Acc]) ->
+    [StartChar|Str] = lists:reverse(Acc),
+    Str.
+
+%%
+
 no_token() ->
     fun(_) ->
 	    no_token
@@ -2049,6 +2087,29 @@ whitespace() ->
 	    %% io:format("whitespace '~s'~n", [lists:reverse(_Acc)]),
 	    no_token
     end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%% If you want to safely match a literal string, this function makes sure
+%% any reserved chars are escaped properly.
+
+safe_literal(LitChars) ->
+    lists:flatten(
+      [ quote_char(LitChar) || LitChar <- LitChars ]
+     ).
+
+quote_char($+) -> "\\+";
+quote_char($*) -> "\\*";
+quote_char($?) -> "\\?";
+quote_char($^) -> "\\^";
+quote_char($$) -> "\\$";
+quote_char($\\) -> "\\\\";
+quote_char($() -> "\\(";
+quote_char($)) -> "\\)";
+quote_char($[) -> "\\[";
+quote_char($]) -> "\\]";
+quote_char($|) -> "\\|";
+quote_char(C) -> C.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
