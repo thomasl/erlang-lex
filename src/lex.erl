@@ -91,7 +91,8 @@
 	 enclosed_token/3,
 	 no_token/0,
 	 comment/0,
-	 whitespace/0
+	 whitespace/0,
+	 newline/0
 	]).
 
 %% librry function for safely quoting regexp literals that may contain reserved chars
@@ -1977,10 +1978,7 @@ real_erlang_lex() ->
      {regexp, 1, "=", op('=') },
 
      {regexp, 1, "%[^\n]*", comment()},
-     {regexp, 2, "\n", fun(_) -> %% io:format("inc lines~n"),
-				 inc_lines(), 
-				 no_token 
-		       end},
+     {regexp, 2, "\n", newline()},
      {regexp, 1, "[\ \t]*", whitespace()}
      ].
 
@@ -2000,7 +1998,7 @@ op(Key) ->
 	    {token, {op, lex:current_line(), Key}}
     end.
 
-%% Note: with current definition, no newlines inside atom
+%% NB: some quoted atoms might be defined not to contain newlines
 
 quoted_atom() ->
     fun([$'|Acc]) ->
@@ -2011,7 +2009,7 @@ quoted_atom() ->
 	    {token, {atom, Line, Atm}}
     end.
 
-%% Note: with current definition, no newlines inside string
+%% NB: Some strings may be defined not to contain newlines
 
 string() ->
     fun([$"|Acc]) ->
@@ -2085,6 +2083,12 @@ comment() ->
 whitespace() ->
     fun(_Acc) ->
 	    %% io:format("whitespace '~s'~n", [lists:reverse(_Acc)]),
+	    no_token
+    end.
+
+newline() ->
+    fun(_Acc) ->
+	    inc_lines(),
 	    no_token
     end.
 
