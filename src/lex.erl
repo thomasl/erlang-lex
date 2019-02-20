@@ -89,6 +89,8 @@
 	 token/1,
 	 enclosed_token/2,
 	 enclosed_token/3,
+	 quoted_atom/0,
+	 string/0,
 	 no_token/0,
 	 comment/0,
 	 whitespace/0,
@@ -601,6 +603,7 @@ lub_acceptance({accepting, Rule1, Prio1}, {accepting, Rule2, Prio2})
 	    %% *** UNFINISHED ***
 	    %% - unreadable to users, should be more informative
 	    %%   (can we print the rule definition?)
+	    %% - should be optional
 	    warning(
 	      "both ~w and ~w can be accepted at once,"
 	      " ~w shadowed~n", 
@@ -1018,7 +1021,7 @@ pre_accept([C|Cs], Acc, _State, Nxt, Table, AcceptLimit, Start, Actions) ->
     case next_state(C, Nxt) of
 	?no_match ->
 	    %% no match possible, fail
-	    {no_match, lists:reverse(Acc), [C|Cs]};
+	    no_match(Acc, [C|Cs]);
         N when N =< AcceptLimit ->
 	    %% move into accepting state N
 	    NewNxt = transition_table(N, Table),
@@ -1031,7 +1034,7 @@ pre_accept([C|Cs], Acc, _State, Nxt, Table, AcceptLimit, Start, Actions) ->
     end;
 pre_accept("", Acc, _State, _Nxt, _Table, _AcceptLimit, _Start, _Actions) ->
     %% no match
-    {no_match, lists:reverse(Acc), ""}.
+    no_match(Acc, "").
 
 %% [C|Cs] = lexed string
 %% Acc = accumulated token
@@ -1220,11 +1223,11 @@ pre_accept_bin(Bin, Pos, Acc, _State, Nxt,
     case curr_char(Bin, Pos) of
 	not_found ->
 	    %% sequence ended
-	    {no_match, lists:reverse(Acc), {Bin, Pos}};
+	    no_match(Acc, {Bin, Pos});
 	{found, C} ->
 	    case next_state(C, Nxt) of
 		?no_match ->
-		    {no_match, lists:reverse(Acc), {Bin, Pos}};
+		    no_match(Acc, {Bin, Pos});
 		N ->
 		    NewNxt = transition_table(N, Table),
 		    NxtPos = inc_pos(Pos),
@@ -1340,6 +1343,28 @@ post_accept_bin(Bin, Pos, Acc, AccSt, _State, Nxt,
 		    end
 	    end
     end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%% What to do when no regexp matched
+%%
+%% Current - exit with somewhat informative message
+%%
+%% Could also return a [{no_match, ...}] element, this was
+%% done previously.
+%%
+%% NB: Should also return line+column numbers if available.
+
+no_match(RevAcc, Remainder) ->
+    RemLine = lists:takewhile(fun(C) when C == $\n ->
+				      false;
+				 (_) ->
+				      true
+			      end, Remainder),
+    exit({lex_no_match, 
+	  {line, current_line()},
+	  {accumulated, lists:reverse(RevAcc)}, 
+	  {remainder, RemLine}}).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
