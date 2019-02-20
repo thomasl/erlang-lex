@@ -1739,10 +1739,23 @@ zip([X|Xs], [Y|Ys]) ->
 zip([], []) ->
     [].
 
-%% perhaps also record # of warnings?
+%% Default is now no warnings.
+
+verbose_warnings() ->
+    put(verbose_lex_warnings, true).
+
+no_warnings() ->
+    put(verbose_lex_warnings, false).
+
+%% 
 
 warning(Str, Xs) ->
-    io:format("Warning: " ++ Str, Xs).
+    case get(verbose_lex_warnings) of
+	true ->
+	    io:format("Warning: " ++ Str, Xs);
+	_ ->
+	    ok
+    end.
 
 log(Str, Xs) ->
     io:format(Str, Xs).
