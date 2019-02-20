@@ -29,6 +29,17 @@
 %% See doc/README.md for documentation, discussion, usage, etc.
 %%
 %% *** UNFINISHED ***
+%% - extension: would like to match C-style comments /* */
+%%    but we need
+%% - extension: regexp implemented as user-level function?
+%%    could then insert explicit code for 'difficult tokens' like C-comments
+%%    however, where to do it? always try such explicit matches first or last?
+%%    seems expensive!
+%% - also: for driving lexing, the case of no match is usually NOT DESIRED
+%%    exiting is not extremely helpful in this case
+%%    perhaps the driver should auto-handle this instead?
+%%    (or insert a least-prio regexp ".")
+%% - add better alt-syntax for regexps, they can get pretty ugly
 %% - only handles 8-bit ASCII, will require a rewrite to handle larger charsets
 %%   * curr. table requires about (s * c) words, where s is the number
 %%     of states and c the number of characters
