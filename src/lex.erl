@@ -30,7 +30,8 @@
 %%
 %% *** UNFINISHED ***
 %% - extension: would like to match C-style comments /* */
-%%    but we need
+%%    but the regexp gets very nasty, perhaps impossible
+%%    (could do it with a custom pre-scan though)
 %% - extension: regexp implemented as user-level function?
 %%    could then insert explicit code for 'difficult tokens' like C-comments
 %%    however, where to do it? always try such explicit matches first or last?
@@ -38,8 +39,9 @@
 %% - also: for driving lexing, the case of no match is usually NOT DESIRED
 %%    exiting is not extremely helpful in this case
 %%    perhaps the driver should auto-handle this instead?
-%%    (or insert a least-prio regexp ".")
-%% - add better alt-syntax for regexps, they can get pretty ugly
+%%    (or insert a least-prio regexp "." that skips and perhaps warns)
+%%    = I think this was the approach of original lex/flex
+%% - add better alt-syntax for regexps, they can get pretty ugly now
 %% - only handles 8-bit ASCII, will require a rewrite to handle larger charsets
 %%   * curr. table requires about (s * c) words, where s is the number
 %%     of states and c the number of characters
@@ -81,6 +83,11 @@
 %%   2. handle UTF8 literals, translate to appropriate byte sequence
 %%      (perl also has character classes and whatnot, do we need to do that?)
 %%   3. any other unicode gotchas to handle?
+%%
+%% Compile-time flags:
+%% DEBUG - enable debug output
+%% BINARYMATCH - provide functions for lexing binaries
+%%   (experimental)
 
 -module(lex).
 -author('thomasl_erlang@yahoo.com').
@@ -107,8 +114,20 @@
 	 whitespace/0,
 	 newline/0
 	]).
+-export([float_rules/0]).  %% example regexp for floats
+-export(
+   %% position counting, currently not used
+   %% (not the same as line counting)
+   [
+    start_pos/0,
+    inc_pos/1,
+    curr_char/2
+   ]).
+-export([strip_c_comments/1]).
 
-%% librry function for safely quoting regexp literals that may contain reserved chars
+%% library function for safely quoting REGEXP LITERALS that may 
+%% contain reserved chars
+
 -export(
    [safe_literal/1]
   ).
@@ -134,9 +153,13 @@
 %% Used when lexing a binary:
 -define(least_pos, 0).
 
-%% Wrapped io:format
+-ifdef(DEBUG).
+-define(log(Str, Xs), io:format("Log: " ++ Str, Xs)).
+-define(warning(Str, Xs), io:format("Warning: " ++ Str, Xs)).
+-else.
 -define(log(Str, Xs), ok).
-%% -define(log(Str, Xs), io:format(Str, Xs)).
+-define(warning(Str, Xs), ok).
+-endif.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -601,7 +624,7 @@ lub_acceptance({accepting, Rule1, Prio1}, {accepting, Rule2, Prio2})
 	Prio1 == Prio2 ->
 	    %% in this case, disambiguate by comparing rule IDs
 	    %% (arbitrary)
-	    {Rule, Prio, ShadowedRule} =
+	    {Rule, Prio, _ShadowedRule} =
 		if
 		    Rule1 < Rule2 ->
 			{Rule1, Prio1, Rule2};
@@ -611,14 +634,10 @@ lub_acceptance({accepting, Rule1, Prio1}, {accepting, Rule2, Prio2})
 			%% can never happen (handled by previous clauses)
 			{Rule1, Prio1, Rule2}
 		end,
-	    %% *** UNFINISHED ***
-	    %% - unreadable to users, should be more informative
-	    %%   (can we print the rule definition?)
-	    %% - should be optional
-	    warning(
-	      "both ~w and ~w can be accepted at once,"
-	      " ~w shadowed~n", 
-	      [Rule1, Rule2, ShadowedRule]),
+	    ?warning(
+	       "both ~w and ~w can be accepted at once,"
+	       " ~w shadowed~n", 
+	       [Rule1, Rule2, _ShadowedRule]),
 	    {accepting, Rule, Prio}
     end.
 
@@ -777,9 +796,9 @@ range_overlap(From0, To0, S0, From1, To1, S1) ->
 epsilon_neighbours(State, FA) ->
     [ NextState || {epsilon, NextState} <- successors(State, FA) ].
 
-epsilon_reachable(State, FA) ->
-    All_seen = epsilon_reach(State, FA, none_seen()),
-    seen_list(All_seen).
+% epsilon_reachable(State, FA) ->
+%    All_seen = epsilon_reach(State, FA, none_seen()),
+%    seen_list(All_seen).
 
 epsilon_reachable_all(States, FA) ->
     All_seen = epsilon_reach_all(States, FA, none_seen()),
@@ -990,6 +1009,7 @@ rename_state(_X, [], Map) ->
 %%
 %% A sequence is a string (list of char) or a binary
 
+-ifdef(BINARYMATCH).
 longest(Lex, Seq) when is_binary(Seq) ->
     longest_bin(Lex, Seq, start_pos());
 longest(Lex, {Bin, Pos}) 
@@ -997,6 +1017,10 @@ longest(Lex, {Bin, Pos})
     longest_bin(Lex, Bin, Pos);
 longest(Lex, Seq) when is_list(Seq) ->
     longest_string(Lex, Seq).
+-else.
+longest(Lex, Seq) when is_list(Seq) ->
+    longest_string(Lex, Seq).
+-endif.
 
 %% Longest match applied to string (list of chars)
 
@@ -1188,7 +1212,7 @@ reset_match({match, State, Acc, Cs}) ->
 %% *** UNFINISHED ***
 %% - does not permit incremental lexing
 
-%% not used, except for testing:
+-ifdef(BINARYMATCH).
 longest_bin(Lex, Bin) when is_binary(Bin) ->
     Pos = start_pos(),
     longest_bin(Lex, Bin, Pos).
@@ -1354,6 +1378,8 @@ post_accept_bin(Bin, Pos, Acc, AccSt, _State, Nxt,
 		    end
 	    end
     end.
+
+-endif. %% BINARYMATCH
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -1574,8 +1600,8 @@ states_of(FA) ->
 
 %%
 
-num_states(FA) ->
-    fa_num_states(FA).
+% num_states(FA) ->
+%    fa_num_states(FA).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% next=1 since least element in tuple is 1
@@ -1624,8 +1650,8 @@ fa_states_of(FA) ->
 	    lists:seq(1, N)
     end.
 
-fa_num_states(FA) ->
-    FA#fa.next-1.
+% fa_num_states(FA) ->
+%    FA#fa.next-1.
 
 %%
 
@@ -1661,10 +1687,12 @@ fa_to_list(FA) ->
 
 %% (a pseudo-FA used as input)
 
+-ifdef(DEBUG).
 fa_from_list(FA) ->
     {next, Nxt} = FA#fa.next,
     {start, Start} = FA#fa.start_state,
     FA#fa{next=Nxt, start_state=Start, states=dict:from_list(FA#fa.states)}.
+-endif.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -1727,6 +1755,7 @@ states_present(StateSet, {_Next, State_names, _DFA_states}) ->
 set_dfa_state(ID, State, {Next, State_names, DFA_states}) ->
     {Next, State_names, dict:store(ID, State, DFA_states)}.
 
+-ifdef(DEBUG).
 pre_dfa_to_list({Next, State_names, DFA_states}) ->
     {Next, dict:to_list(State_names), dict:to_list(DFA_states)}.
 
@@ -1735,6 +1764,7 @@ pre_dfa_state_names_list(Pre_DFA) ->
 
 pre_dfa_state_names({_Next, State_names, _DFA_states}) ->
     State_names.
+-endif.
 
 pre_dfa_to_dfa(Start, {Next, _State_names, DFA_states}=_Pre_DFA) ->
     #fa{next=Next,
@@ -1749,27 +1779,6 @@ zip([X|Xs], [Y|Ys]) ->
     [ {X,Y} | zip(Xs, Ys) ];
 zip([], []) ->
     [].
-
-%% Default is now no warnings.
-
-verbose_warnings() ->
-    put(verbose_lex_warnings, true).
-
-no_warnings() ->
-    put(verbose_lex_warnings, false).
-
-%% 
-
-warning(Str, Xs) ->
-    case get(verbose_lex_warnings) of
-	true ->
-	    io:format("Warning: " ++ Str, Xs);
-	_ ->
-	    ok
-    end.
-
-log(Str, Xs) ->
-    io:format(Str, Xs).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -1790,14 +1799,6 @@ test_all(N) ->
 test(Regexp) ->
     Regexp_rules = [ {regexp, parse_regexp(Regexp), {rule, 1}} ],
     regexps_to_table(Regexp_rules).
-
-insert(Item, [X|Xs]) ->
-    [X|insert_before(Item, Xs)].
-
-insert_before(Item, [X|Xs]) ->
-    [Item,X|insert_before(Item,Xs)];
-insert_before(_Item, []) ->
-    [].
 
 test(1, String) ->
     Lex = lex:regexps_to_table(
@@ -2168,9 +2169,50 @@ quote_char(C) -> C.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %% Here is a rule for floats that also handles various IEEE special numbers
+%%
+%% UNFINISHED
+%% - should be moved to library
 
 float_rules() ->
     [{regexp, 0, 
       "((\\+|-)?[0-9]+\\.[0-9]+((E|e)(\\+|-)?[0-9]+)?|NAN|NaN|(\\+|-)?(INF|Inf|inf))",item(float)}
     ].
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%% This can be run as a pre-pass over the input, either flat or nested.
+%% - more expensive than integrated with lexer, but also a lot easier
+%%   than writing a useful lex spec
+
+strip_c_comments(Str) ->
+    strip_c_comments(Str, []).
+
+%% Note: encountering '*/' before any starting '/*' is treated as any
+%% string.
+%%
+%% Note: escaping is NOT handled, see the first clause for how to do it
+%% though. 
+
+%strip_c_comments([$\\, C |Cs], Acc) ->
+%    strip_c_comments(Cs, [C, $\\ | Acc]);
+strip_c_comments("/*" ++ Str, Acc) ->
+    Level = 1,
+    NewStr = drop_comments(Str, Level),
+    strip_c_comments(NewStr, Acc);
+strip_c_comments([C|Cs], Acc) ->
+    strip_c_comments(Cs, [C|Acc]);
+strip_c_comments([], Acc) ->
+    lists:reverse(Acc).
+
+drop_comments("/*" ++ Str, Lvl) ->
+    drop_comments(Str, Lvl+1);
+drop_comments("*/" ++ Str, Lvl) ->
+    if
+	Lvl > 0 ->
+	    %% some nested /* */
+	    drop_comments(Str, Lvl-1);
+	true ->
+	    %% outermost /* */
+	    Str
+    end.
 
