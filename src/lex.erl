@@ -2190,13 +2190,17 @@ strip_c_comments(Str) ->
 %% Note: encountering '*/' before any starting '/*' is treated as any
 %% string.
 %%
-%% Note: escaping is NOT handled, see the first clause for how to do it
-%% though. 
+%% Note: Escaping is NOT handled, see the first clause for how to do it
+%% though. We skip this because it's a corner case that may not be relevant.
+%%
+%% Note: Unclosed comments at end of string are acceptable.
+
+-define(start_level, 0).
 
 %strip_c_comments([$\\, C |Cs], Acc) ->
 %    strip_c_comments(Cs, [C, $\\ | Acc]);
 strip_c_comments("/*" ++ Str, Acc) ->
-    Level = 1,
+    Level = ?start_level,
     NewStr = drop_comments(Str, Level),
     strip_c_comments(NewStr, Acc);
 strip_c_comments([C|Cs], Acc) ->
@@ -2208,11 +2212,17 @@ drop_comments("/*" ++ Str, Lvl) ->
     drop_comments(Str, Lvl+1);
 drop_comments("*/" ++ Str, Lvl) ->
     if
-	Lvl > 0 ->
+	Lvl > ?start_level ->
 	    %% some nested /* */
 	    drop_comments(Str, Lvl-1);
 	true ->
 	    %% outermost /* */
 	    Str
-    end.
+    end;
+drop_comments([_|Cs], Lvl) ->
+    drop_comments(Cs, Lvl);
+drop_comments([], _Lvl) ->
+    %% unclosed comments at end are accepted
+    [].
+
 
