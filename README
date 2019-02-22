@@ -4,26 +4,32 @@ Works by building an NFA given the rules, then converting the NFA
 into a DFA. If multiple rules can match, a priority can be specified.
 Ambiguous matches yield compile-time errors.
 
-Note: building a lex table requires about 50ms, so it's possible to
-just do it dynamically if the lexing task is substantial.
-
-Advantage: generate and run your lexer on the fly. See lex.erl for
-some examples.  lex:with(Rules, String) is the easiest entrypoint.
-
-Drawbacks: lexing errors currently not very legible.
+Note that DYNAMICALLY building the lexing table is normally 'fast
+enough' for most uses. Use 'lex:with(LexSpec, String)'.
 
 TODO:
-- better error messages, at compile time and runtime
-- better support for incremental lexing
-- better support lib for writing lexers
-- allow UTF-8 literals and text in regexps
-  * regexp_parse has to be extended
-  * possibly also matching characters, if needed (in particular, matching
-    one character = a valid sequence of UTF-8 bytes)
-- allow full UTF-8, character classes, etc.
+- refactor [lex gen; lex driver; lex codegen; tokenization library]
+- improve regexp syntax, including character classes
+  * currently need lots of escaping, nasty
+- improved error checking
+  * better messages on overlapping matches
+- improved matching
+  * current default is to fail on no match, but tools like lex/flex instead
+    emit/skip the current char as a default and continue
+- support for lexing on binaries
+  * currently experimental support
+- support for incremental lexing 
+  (basically return 'current state' and allow resume later)
+- only supports ASCII, in particular no UTF-8 support
+  * support UTF-8 literals
+  * support matching single UTF-8 character (variable byte length)
+  * support full UTF-8 regexps with character classes, etc
+    (probably also needs codegen)
 - code generation
   * emit a table as a constant data structure, and the lex driver with it,
     and a suitable API
   * maybe: emit leex-style full code for the lexer using the table
     - worth checking which is faster and smaller
-  * easier to distribute than being required to use erlang-lex
+  * note: for UTF-8, the table will usually be very sparse and leex-style
+    explicit code may be required
+
