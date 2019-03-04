@@ -123,7 +123,8 @@
     inc_pos/1,
     curr_char/2
    ]).
--export([strip_c_comments/1]).
+-export([strip_c_comments/1,
+	 resolve_line/1]).
 
 %% library function for safely quoting REGEXP LITERALS that may 
 %% contain reserved chars
@@ -2225,4 +2226,36 @@ drop_comments([], _Lvl) ->
     %% unclosed comments at end are accepted
     [].
 
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%% Library function
+%%
+%% Count number of lines and replace occurrences of "?LINE" with the
+%% current line number as a string.
+%%
+%% This operates on the raw string representation, so run it before
+%% 
+%%
+%% UNFINISHED
+%% - should parametrize wrt macro name
+%% - assumes \\n is escaped newline = doesn't count
+%%   (no good treatment of multiline strings at this point)
+
+resolve_line(Str) ->
+    StartLine = 1,
+    resolve_line(Str, StartLine, []).
+
+resolve_line("?LINE" ++ Str, CurrLine, Xs) ->
+    NewXs = lists:reverse(integer_to_list(CurrLine)) ++ Xs,
+    resolve_line(Str, CurrLine, NewXs);
+resolve_line([$\\,C|Str], CurrLine, Xs) ->
+    resolve_line(Str, CurrLine, [C,$\\|Xs]);
+resolve_line([$\n|Str], CurrLine, Xs) ->
+    NxtLine = CurrLine+1,
+    resolve_line(Str, NxtLine, [$\n|Xs]);
+resolve_line([C|Cs], CurrLine, Xs) ->
+    resolve_line(Cs, CurrLine, [C|Xs]);
+resolve_line([], _CurrLine, Xs) ->
+    lists:reverse(Xs).
 
