@@ -63,7 +63,28 @@
 %%   {seq, REs}
 %%   {range, From, To}
 %%
-%% Note that RE? is expressed as (RE|) ie, RE or nothing
+%% We currently return the following format:
+%% - an RE is a list, a sequence of sub-REs
+%%
+%%   {lit, C}                   exactly character C (integer)
+%%   {range, From, To}          characters in range From-To
+%%   {zero_or_more, RE}         RE repeated zero or more times
+%%   {one_or_more, RE}          RE repeated one or more times
+%%   {'or', RE_list}            one of the REs matches (at least one)
+%%   {'not', RE}                RE does not match
+%%   {optional, RE}             0-1
+%%   {from_to, From, To, RE}    From-To repetitions of RE
+%%
+%% (Not sure if all of these are relevant?) Basic translation scheme
+%%
+%%  {lit, C} => {range, C, C}
+%%  {range, From, To} => {range, From, To}
+%%  {zero_or_more, RE} => {iter, RE}
+%%  {one_or_more, RE} => {seq, [RE, {iter, RE}]}
+%%  {'or', REs} => {disj, REs}
+%%  {'not', RE} => ... ??
+%%  {optional, RE} => {disj, [RE, empty]}
+%%  {from_to, From, To, RE} => {seq, [RE,...,Re, {optional, RE}, ... {optional, RE}]}
 
 string(Str) ->
     parse_re(Str).
