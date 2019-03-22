@@ -86,6 +86,8 @@
 %%  {optional, RE} => {disj, [RE, empty]}
 %%  {from_to, From, To, RE} => {seq, [RE,...,Re, {optional, RE}, ... {optional, RE}]}
 
+%% Should return {ok, LexInternalRE}, see lex.erl
+
 string(Str) ->
     parse_re(Str).
 

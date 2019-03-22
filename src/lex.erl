@@ -185,14 +185,26 @@ regexps_to_internal(Regexp_rules0) ->
     [ regexp_to_internal(N, Rule)
       || {N, Rule} <- zip(lists:seq(1,length(Regexp_rules0)), Regexp_rules0) ].
 
-%% Convert a single regexp rule to internal form
+%% Convert a single regexp rule to internal form. We permit two different
+%% forms of regexps.
+%%
+%% UNFINISHED
+%% - clumsy to repeat code like this
+%% - 'regexp2' isn't very nice either
+%%   * should we warn about either format?
 
 regexp_to_internal(N, {regexp, Regexp_str, Action}) ->
     Prio = 0,
     {regexp, N, parse_regexp(Regexp_str), Action, Prio};
 regexp_to_internal(N, {regexp, Prio, Regexp_str, Action}) 
   when is_integer(Prio), Prio >= 0 ->
-    {regexp, N, parse_regexp(Regexp_str), Action, Prio}.
+    {regexp, N, parse_regexp(Regexp_str), Action, Prio};
+regexp_to_internal(N, {regexp2, Regexp_str, Action}) ->
+    Prio = 0,
+    {regexp, N, parse_regexp2(Regexp_str), Action, Prio};
+regexp_to_internal(N, {regexp2, Prio, Regexp_str, Action}) 
+  when is_integer(Prio), Prio >= 0 ->
+    {regexp, N, parse_regexp2(Regexp_str), Action, Prio}.
     
 %% ?max_char is currently used to decide the "charset size"
 %% we permit characters 0-?maxchar (excepting ?no_match,)
@@ -248,6 +260,15 @@ parse_regexp(Regexp) ->
     case regexp_parse:string(Regexp) of
   	{ok, RE} ->
   	    internal_form(RE);
+  	Err ->
+  	    exit(Err)
+    end.
+
+parse_regexp2(Regexp) ->
+    case regexp_parse2:string(Regexp) of
+  	{ok, RE} ->
+	    exit({regexp2_format_parsed_but_not_yet_compiled, Regexp, RE});
+  	    %% internal_form(RE);
   	Err ->
   	    exit(Err)
     end.
