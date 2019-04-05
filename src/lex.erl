@@ -88,6 +88,9 @@
 %% DEBUG - enable debug output
 %% BINARYMATCH - provide functions for lexing binaries
 %%   (experimental)
+%%
+%% Should have nice ways to dump the various NFAs, DFAs and final automaton,
+%% for debugging.
 
 -module(lex).
 -author('thomasl_erlang@yahoo.com').
