@@ -108,6 +108,7 @@
 -export([item/1,
 	 op/1,
 	 token/1,
+	 raw_token/1,
 	 enclosed_token/2,
 	 enclosed_token/3,
 	 quoted_atom/0,
@@ -2102,9 +2103,16 @@ char() ->
 	    {token, {char, lex:current_line(), C}}
     end.
 
-%% perhaps {token, {Key, current_line()}}?
+%% Use this if you want to emit token with line number, e.g., {'(', 42} 
 	
 token(Key) ->    
+    fun(_Acc) ->
+	    {token, {Key, lex:current_line()}}
+    end.
+
+%% If you only want to emit '(' or similar, use this.
+
+raw_token(Key) ->    
     fun(_Acc) ->
 	    {token, Key}
     end.
