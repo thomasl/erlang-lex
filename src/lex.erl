@@ -166,6 +166,11 @@
 -define(warning(Str, Xs), ok).
 -endif.
 
+%% Test for accepting state
+
+-define(is_accepting(N, AccLim), 
+	((N) =< (AccLim))).
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
 %% Quick entrypoint
@@ -1083,7 +1088,7 @@ pre_accept([C|Cs], Acc, _State, Nxt, Table, AcceptLimit, Start, Actions) ->
 	?no_match ->
 	    %% no match possible, fail
 	    no_match(Acc, [C|Cs]);
-        N when N =< AcceptLimit ->
+        N when ?is_accepting(N, AcceptLimit) ->
 	    %% move into accepting state N
 	    NewNxt = transition_table(N, Table),
 	    accept(Cs, acc(C, Acc), none_acc(), N, NewNxt, 
@@ -1128,7 +1133,7 @@ accept([C|Cs]=Lst, Acc, AccSt, State, Nxt,
 		    [T | longest_string(Start, Table, AcceptLimit, 
 					Actions, Lst) ]
 	    end;
-	N when N =< AcceptLimit ->
+	N when ?is_accepting(N, AcceptLimit) ->
 	    %% still in accepting state, keep accumulating
 	    NewNxt = transition_table(N, Table),
 	    accept(Cs, acc(C, Acc), AccSt, N, NewNxt, 
@@ -1173,7 +1178,7 @@ post_accept([C|Cs]=_Lst, Acc, AccSt, _State, Nxt,
 		    [ T | longest_string(Start, Table, AcceptLimit, 
 					 Actions, Cs0) ]
 	    end;
-	N when N =< AcceptLimit ->
+	N when ?is_accepting(N, AcceptLimit) ->
 	    %% we re-enter an accepting state
 	    NewNxt = transition_table(N, Table),
 	    accept(Cs, acc(C, Acc), AccSt, N, NewNxt,
