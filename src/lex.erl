@@ -86,8 +86,6 @@
 %%
 %% Compile-time flags:
 %% DEBUG - enable debug output
-%% BINARYMATCH - provide functions for lexing binaries
-%%   (experimental)
 %%
 %% Should have nice ways to dump the various NFAs, DFAs and final automaton,
 %% for debugging.
@@ -1040,18 +1038,8 @@ rename_state(_X, [], Map) ->
 %%
 %% A sequence is a string (list of char) or a binary
 
--ifdef(BINARYMATCH).
-longest(Lex, Seq) when is_binary(Seq) ->
-    longest_bin(Lex, Seq, start_pos());
-longest(Lex, {Bin, Pos}) 
-  when is_binary(Bin), is_integer(Pos), Pos >= ?least_pos ->
-    longest_bin(Lex, Bin, Pos);
 longest(Lex, Seq) when is_list(Seq) ->
     longest_string(Lex, Seq).
--else.
-longest(Lex, Seq) when is_list(Seq) ->
-    longest_string(Lex, Seq).
--endif.
 
 %% Longest match applied to string (list of chars)
 
@@ -1235,182 +1223,6 @@ save_match(State, Acc, Cs) ->
 
 reset_match({match, State, Acc, Cs}) ->
     {State, Acc, Cs}.
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%
-%% Longest match on sequence (binary() or {binary(), position()})
-%%
-%% *** UNFINISHED ***
-%% - does not permit incremental lexing
-
--ifdef(BINARYMATCH).
-longest_bin(Lex, Bin) when is_binary(Bin) ->
-    Pos = start_pos(),
-    longest_bin(Lex, Bin, Pos).
-
-%% Used when matching invoked from longest/2
-
-longest_bin({lex, Start, AcceptLimit, Table, Actions}, Bin, Pos) ->
-    no_lines(),
-    longest_bin(Start, Table, AcceptLimit, Actions, Bin, Pos).
-
-%% the following is used when matching restarts from a saved state {Bin, Pos}.
-
-longest_bin(Start, Table, AcceptLimit, Actions, {Bin, Pos}) ->
-    longest_bin(Start, Table, AcceptLimit, Actions, Bin, Pos).
-
-%% Here is the "moral entrypoint".
-
-longest_bin(Start, Table, AcceptLimit, Actions, Bin, Pos) ->
-    Row = transition_table(Start, Table),
-    pre_accept_bin(Bin, Pos, none_acc(), Start, Row,
-		   Table, AcceptLimit, Start, Actions).
-
-%% @see pre_accept/8 for most parameters (except Bin, Pos) and for
-%% how this is supposed to work.
-%%
-%% Bin: the binary being lexed
-%% Pos: the current position in the binary
-%%
-%% - if we reach end of sequence, stop
-%% - if we reach error state, match fails
-%% - if we enter accepting state, switch to accept_bin
-%% - otherwise, keep going
-%%
-%% *** UNFINISHED ***
-%% - we accumulate the chars into a list (which works)
-%%   but we should also permit just positions to be stored
-%%   for extra speed
-%% - incremental lexing not handled (curr_char not_found => "partial state")
-%% - _State dead?
-
-pre_accept_bin(Bin, Pos, Acc, _State, Nxt, 
-	       Table, AcceptLimit, Start, Actions) ->
-    case curr_char(Bin, Pos) of
-	not_found ->
-	    %% sequence ended
-	    no_match(Acc, {Bin, Pos});
-	{found, C} ->
-	    case next_state(C, Nxt) of
-		?no_match ->
-		    no_match(Acc, {Bin, Pos});
-		N ->
-		    NewNxt = transition_table(N, Table),
-		    NxtPos = inc_pos(Pos),
-		    if
-			N =< AcceptLimit ->
-			    %% accepting state
-			    accept_bin(Bin, NxtPos, acc(C, Acc), none_acc(),
-				       N, NewNxt, Table, AcceptLimit,
-				       Start, Actions);
-			true ->
-			    %% not accepting
-			    pre_accept_bin(Bin, NxtPos, acc(C,Acc), N, NewNxt,
-					   Table, AcceptLimit, Start, Actions)
-		    end
-	    end
-    end.
-
-%% @see accept/9 for most parameters. Bin is the incoming binary, Pos
-%% is the current position in the binary.
-
-accept_bin(Bin, Pos, Acc, AccSt, State, Nxt, 
-	   Table, AcceptLimit, Start, Actions) ->
-    case curr_char(Bin, Pos) of
-	not_found ->
-	    %% sequence ended, we have a match
-	    case emit_token(Actions, State, Acc) of
-		no_token ->
-		    [];
-		{token, T} ->
-		    [T]
-	    end;
-	{found, C} ->
-	    case next_state(C, Nxt) of
-		?no_match ->
-		    case emit_token(Actions, State, Acc) of
-			no_token ->
-			    %% discard the acc.token, continue matching
-			    longest_bin(Start, Table, AcceptLimit, 
-					Actions, Bin, Pos);
-			{token, T} ->
-			    %% emit the token, continue matching
-			    [ T | longest_bin(Start, Table, AcceptLimit,
-					      Actions, Bin, Pos) ]
-	 	    end;
-		N ->
-		    NxtPos = inc_pos(Pos),
-		    NewNxt = transition_table(N, Table),
-		    if
-			N =< AcceptLimit ->
-			    %% remain in accepting state
-			    accept_bin(Bin, NxtPos, acc(C, Acc), AccSt, N,
-				       NewNxt, Table, AcceptLimit, 
-				       Start, Actions);
-			true ->
-			    %% leave accepting state, save what has
-			    %% matched so far
-			    post_accept_bin(Bin, NxtPos, acc(C, Acc),
-					    save_match(State, Acc, {Bin, Pos}),
-					    N, NewNxt, Table,
-					    AcceptLimit, Start, Actions)
-		    end
-	    end
-    end.
-
-%% @see post_accept/9 for most arguments; Bin and Pos is the binary
-%% and the position in the binary
-%%
-%% *** UNFINISHED ***
-%% - State dead?
-
-post_accept_bin(Bin, Pos, Acc, AccSt, _State, Nxt,
-		Table, AcceptLimit, Start, Actions) ->
-    case curr_char(Bin, Pos) of
-	not_found ->
-	    %% no match possible, reset to saved token and continue from
-	    %% there
-	    {State0, Acc0, Seq0} = reset_match(AccSt),
-	    case emit_token(Actions, State0, Acc0) of
-		no_token ->
-		    longest_bin(Start, Table, AcceptLimit, 
-				Actions, Seq0);
-		{token, T} ->
-		    [ T | longest_bin(Start, Table, AcceptLimit, 
-				      Actions, Seq0) ]
-	    end;
-	{found, C} ->
-	    case next_state(C, Nxt) of
-		?no_match ->
-		    %% reset to saved token
-		    {State0, Acc0, Seq0} = reset_match(AccSt),
-		    case emit_token(Actions, State0, Acc0) of
-			no_token ->
-			    longest_bin(Start, Table, AcceptLimit, 
-					Actions, Seq0);
-			{token, T} ->
-			    [T | longest_bin(Start, Table, AcceptLimit,
-					     Actions, Seq0) ]
-		    end;
-		N ->
-		    NxtPos = inc_pos(Pos),
-		    NewNxt = transition_table(N, Table),
-		    if
-			N =< AcceptLimit ->
-			    %% reenter accepting state
-			    accept_bin(Bin, NxtPos, acc(C, Acc), AccSt, 
-				       N, NewNxt,
-				       Table, AcceptLimit, Start, Actions);
-			true ->
-			    %% still non-accepting
-			    post_accept_bin(Bin, NxtPos, acc(C, Acc), AccSt,
-					    N, NewNxt, Table, AcceptLimit,
-					    Start, Actions)
-		    end
-	    end
-    end.
-
--endif. %% BINARYMATCH
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
