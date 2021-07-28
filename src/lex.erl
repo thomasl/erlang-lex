@@ -92,7 +92,7 @@
 
 -module(lex).
 -author('thomasl_erlang@yahoo.com').
--export([with/2,
+-export([o_with/2,
 	 regexps_to_table/1,
 	 regexps_to_nfa/1,
 	 nfa_to_dfa/1,
@@ -100,7 +100,8 @@
 	]).
 
 %% library functions for using the generated lexer
--export([longest/2]).
+-export([o_longest/2]).
+%-export([longest/2]).
 
 %% useful token-related exports ("library")
 -export([item/1,
@@ -171,11 +172,11 @@
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
-%% Quick entrypoint
+%% Quick entrypoint - old version
 
-with(Regexp_rules, String) ->
+o_with(Regexp_rules, String) ->
     Tab = regexps_to_table(Regexp_rules),
-    longest(Tab, String).
+    o_longest(Tab, String).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -1017,6 +1018,8 @@ rename_state(_X, [], Map) ->
     exit({state_not_found, Map}).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% OLD VERSION - lexing of entire list, returns list of tokens
+%%  rather than the classic token-at-a-time.
 %%
 %% Driving the lexical analysis
 %%
@@ -1038,19 +1041,19 @@ rename_state(_X, [], Map) ->
 %%
 %% A sequence is a string (list of char) or a binary
 
-longest(Lex, Seq) when is_list(Seq) ->
-    longest_string(Lex, Seq).
+o_longest(Lex, Seq) when is_list(Seq) ->
+    o_longest_string(Lex, Seq).
 
 %% Longest match applied to string (list of chars)
 
-longest_string({lex, Start, AcceptLimit, Table, Actions}, String) 
+o_longest_string({lex, Start, AcceptLimit, Table, Actions}, String) 
   when is_list(String) -> 
     no_lines(),
-    longest_string(Start, Table, AcceptLimit, Actions, String).
+    o_longest_string(Start, Table, AcceptLimit, Actions, String).
 
-longest_string(Start, Table, AcceptLimit, Actions, String) ->
+o_longest_string(Start, Table, AcceptLimit, Actions, String) ->
     Row = transition_table(Start, Table),
-    pre_accept(String, none_acc(), Start, Row, 
+    o_pre_accept(String, none_acc(), Start, Row, 
 	       Table, AcceptLimit, Start, Actions).
 
 %% [C|Cs] string to be lexed
@@ -1071,7 +1074,7 @@ longest_string(Start, Table, AcceptLimit, Actions, String) ->
 %% *** UNFINISHED ***
 %% - parameter State is dead? or something missing?
 
-pre_accept([C|Cs], Acc, _State, Nxt, Table, AcceptLimit, Start, Actions) ->
+o_pre_accept([C|Cs], Acc, _State, Nxt, Table, AcceptLimit, Start, Actions) ->
     case next_state(C, Nxt) of
 	?no_match ->
 	    %% no match possible, fail
@@ -1079,14 +1082,14 @@ pre_accept([C|Cs], Acc, _State, Nxt, Table, AcceptLimit, Start, Actions) ->
         N when ?is_accepting(N, AcceptLimit) ->
 	    %% move into accepting state N
 	    NewNxt = transition_table(N, Table),
-	    accept(Cs, acc(C, Acc), none_acc(), N, NewNxt, 
+	    o_accept(Cs, acc(C, Acc), none_acc(), N, NewNxt, 
 		   Table, AcceptLimit, Start, Actions);
 	N ->
 	    NewNxt = transition_table(N, Table),
-	    pre_accept(Cs, acc(C, Acc), N, NewNxt, 
+	    o_pre_accept(Cs, acc(C, Acc), N, NewNxt, 
 		    Table, AcceptLimit, Start, Actions)
     end;
-pre_accept("", Acc, _State, _Nxt, _Table, _AcceptLimit, _Start, _Actions) ->
+o_pre_accept("", Acc, _State, _Nxt, _Table, _AcceptLimit, _Start, _Actions) ->
     %% no match
     no_match(Acc, "").
 
@@ -1106,7 +1109,7 @@ pre_accept("", Acc, _State, _Nxt, _Table, _AcceptLimit, _Start, _Actions) ->
 %% If we get into a non-accepting state, save the current match and
 %%  go into post_accept
 
-accept([C|Cs]=Lst, Acc, AccSt, State, Nxt, 
+o_accept([C|Cs]=Lst, Acc, AccSt, State, Nxt, 
        Table, AcceptLimit, Start, Actions) ->
     case next_state(C, Nxt) of
 	?no_match ->
@@ -1116,24 +1119,24 @@ accept([C|Cs]=Lst, Acc, AccSt, State, Nxt,
 	    %%
 	    case emit_token(Actions, State, Acc) of
 		no_token ->
-		    longest_string(Start, Table, AcceptLimit, Actions, Lst);
+		    o_longest_string(Start, Table, AcceptLimit, Actions, Lst);
 		{token, T} ->
-		    [T | longest_string(Start, Table, AcceptLimit, 
+		    [T | o_longest_string(Start, Table, AcceptLimit, 
 					Actions, Lst) ]
 	    end;
 	N when ?is_accepting(N, AcceptLimit) ->
 	    %% still in accepting state, keep accumulating
 	    NewNxt = transition_table(N, Table),
-	    accept(Cs, acc(C, Acc), AccSt, N, NewNxt, 
+	    o_accept(Cs, acc(C, Acc), AccSt, N, NewNxt, 
 		   Table, AcceptLimit, Start, Actions);
 	N ->
 	    %% leaving accepting state, so save current token
 	    NewNxt = transition_table(N, Table),
-	    post_accept(Cs, acc(C, Acc), save_match(State, Acc, Lst), 
-			N, NewNxt,
-			Table, AcceptLimit, Start, Actions)
+	    o_post_accept(Cs, acc(C, Acc), save_match(State, Acc, Lst), 
+			  N, NewNxt,
+			  Table, AcceptLimit, Start, Actions)
     end;
-accept("", Acc, _AccSt, State, _Nxt, _Table, _AcceptLimit, _Start, Actions) ->
+o_accept("", Acc, _AccSt, State, _Nxt, _Table, _AcceptLimit, _Start, Actions) ->
     %% no more to lex and we are in an accepting state => emit token
     %% and end
     case emit_token(Actions, State, Acc) of
@@ -1153,7 +1156,7 @@ accept("", Acc, _AccSt, State, _Nxt, _Table, _AcceptLimit, _Start, Actions) ->
 %%
 %% Otherwise, keep going.
 
-post_accept([C|Cs]=_Lst, Acc, AccSt, _State, Nxt, 
+o_post_accept([C|Cs]=_Lst, Acc, AccSt, _State, Nxt, 
 	    Table, AcceptLimit, Start, Actions) ->
     case next_state(C, Nxt) of
 	?no_match ->
@@ -1161,31 +1164,31 @@ post_accept([C|Cs]=_Lst, Acc, AccSt, _State, Nxt,
 	    {State0, Acc0, Cs0} = reset_match(AccSt),
 	    case emit_token(Actions, State0, Acc0) of
 		no_token ->
-		    longest_string(Start, Table, AcceptLimit, Actions, Cs0);
+		    o_longest_string(Start, Table, AcceptLimit, Actions, Cs0);
 		{token, T} ->
-		    [ T | longest_string(Start, Table, AcceptLimit, 
-					 Actions, Cs0) ]
+		    [ T | o_longest_string(Start, Table, AcceptLimit, 
+					   Actions, Cs0) ]
 	    end;
 	N when ?is_accepting(N, AcceptLimit) ->
 	    %% we re-enter an accepting state
 	    NewNxt = transition_table(N, Table),
-	    accept(Cs, acc(C, Acc), AccSt, N, NewNxt,
-		   Table, AcceptLimit, Start, Actions);
+	    o_accept(Cs, acc(C, Acc), AccSt, N, NewNxt,
+		     Table, AcceptLimit, Start, Actions);
 	N ->
 	    %% still in non-accepting state, keep searching
 	    NewNxt = transition_table(N, Table),
-	    post_accept(Cs, acc(C, Acc), AccSt, N, NewNxt,
-			Table, AcceptLimit, Start, Actions)
+	    o_post_accept(Cs, acc(C, Acc), AccSt, N, NewNxt,
+			  Table, AcceptLimit, Start, Actions)
     end;
-post_accept("", _Acc, AccSt, _State, _Nxt, Table, 
-	    AcceptLimit, Start, Actions) ->
+o_post_accept("", _Acc, AccSt, _State, _Nxt, Table, 
+	      AcceptLimit, Start, Actions) ->
     %% no more matching, reset to saved token and continue from there
     {State0, Acc0, Cs0} = reset_match(AccSt),
     case emit_token(Actions, State0, Acc0) of
 	no_token ->
-	    longest_string(Start, Table, AcceptLimit, Actions, Cs0);
+	    o_longest_string(Start, Table, AcceptLimit, Actions, Cs0);
 	{token, T} ->
-	    [ T | longest_string(Start, Table, AcceptLimit, Actions, Cs0) ]
+	    [ T | o_longest_string(Start, Table, AcceptLimit, Actions, Cs0) ]
     end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -1650,7 +1653,7 @@ test(1, String) ->
 	     {regexp, "[1-9][0-9]*", int}, 
 	     {regexp, "[\n\t\ ]*", fun(_) -> no_token end}]
 	   ),
-    longest(Lex, String).
+    o_longest(Lex, String).
 
 %% this is a reasonable lexing grammar, somewhat sparse with  reserved words
 %%
