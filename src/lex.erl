@@ -92,6 +92,10 @@
 
 -module(lex).
 -author('thomasl_erlang@yahoo.com').
+-export(
+   [one/2,
+    with/2
+   ]).
 -export([o_with/2,
 	 regexps_to_table/1,
 	 regexps_to_nfa/1,
@@ -154,8 +158,31 @@
 	 test_exp/1
 	]).
 
-%% Used when lexing a binary:
--define(least_pos, 0).
+%% ?max_char is currently used to decide the "charset size"
+%% we permit characters 0-?maxchar (excepting ?no_match,)
+
+-define(max_char, 255).
+
+%% Possibly not needed, but for the sake of symmetry
+%%
+%% NOTE: currently,the code generator relies on doing "element" on
+%%  tuples, so we _can't_ handle  ?min_char = 0 ...
+
+-define(min_char, 1).
+
+%% ?no_match is a reserved state indicating error/no match possible
+%%
+%% - when the table is represented as a tuple of tuples, we can have
+%%   ?no_match = -1
+%% - if the table is a binary, we would like to fit all characters into
+%%   an unsigned byte ... in that case, ?no_match can't be -1. Not sure
+%%   what it should be. (255?)
+
+-define(no_match, -1).
+
+%% For compact tables, the value must be unsigned (which is a drawback).
+
+-define(compact_no_match, 255).
 
 -ifdef(DEBUG).
 -define(log(Str, Xs), io:format("Log: " ++ Str, Xs)).
@@ -169,6 +196,209 @@
 
 -define(is_accepting(N, AccLim), 
 	((N) =< (AccLim))).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% This provides lexing of an entire stream/list, similar to lex:with/2,
+%% though using one/2
+%% 
+%% A parser that incrementally calls the lexer should call one/2 directly
+%% when another token is desired.
+%%
+%% NB: Current behavior on no match is very strict - it is possible we would
+%%  prefer just doing like unix lex and 'emit the character' and restart lexing
+%%  on the next position
+
+with(Regexp_rules, Str) ->
+    LEX  = regexps_to_table(Regexp_rules),
+    lex_string(LEX, Str).
+
+%% (testing: convert file to string)
+f(File) ->
+    {ok, Bin} = file:read_file(File),
+    binary_to_list(Bin).
+
+lex_string(LEX, Str) ->
+    lex_string(LEX, Str, []).
+
+lex_string(LEX, Str, Acc) ->
+    case one(LEX, Str) of
+	{token, T, RestStr} ->
+	    lex_string(LEX, RestStr, [T|Acc]);
+	{no_match, _Line, _AccToken, _Remains} = NOMATCH ->
+	    exit(NOMATCH);
+	end_of_stream ->
+	    %% finished cleanly, emit the accumulated tokens
+	    lists:reverse(Acc);
+	Other ->
+	    exit({unknown_return_value, Other})
+    end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% Adapted from lex tokenization loop, BUT emits one token + next state
+%% (or error or end of stream).
+%%
+%% This provides a more usual interface to lexing, like what the original
+%% Unix lex/flex/... did. The parser should invoke this to get more tokens.
+%%
+%% NB: If a token is returned, we return {Token, RestString}.
+
+%% Returns one of 
+%%  {token, T, RestString}
+%%  {no_match, Line, AccToken, RestString}
+%%  end_of_stream
+
+one(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions}, String) ->
+    longest_string(LEX, String).
+
+%% Longest match applied to string (list of chars)
+
+longest_string({lex, Start, AcceptLimit, Table, Actions}, String) 
+  when is_list(String) -> 
+    no_lines(),
+    longest_string(Start, Table, AcceptLimit, Actions, String).
+
+longest_string(_Start, _Table, _AcceptLimit, _Actions, "") ->
+    end_of_stream;
+longest_string(Start, Table, AcceptLimit, Actions, String) ->
+    Row = transition_table(Start, Table),
+    pre_accept(String, none_acc(), Row, 
+	       Table, AcceptLimit, Start, Actions).
+
+%% [C|Cs] string to be lexed
+%% Acc = accumulated possible match so far
+%% State = current state
+%% Nxt = state transition vector
+%% Table = state transition table
+%% AcceptLimit = max. # for accepting state (up to this are accepting)
+%% Start = starting state
+%%
+%% If we reach an error state or end of string, stop with error. No match
+%%  was possible.
+%%
+%% If we enter an accepting state, then go to accept
+%%
+%% Otherwise, keep going in pre_acc.
+%%
+%% *** UNFINISHED ***
+%% - parameter State is dead? or something missing?
+
+pre_accept([C|Cs], Acc, Nxt, Table, AcceptLimit, Start, Actions) ->
+    case next_state(C, Nxt) of
+	?no_match ->
+	    %% no match possible, fail
+	    no_match(Acc, [C|Cs]);
+        N when ?is_accepting(N, AcceptLimit) ->
+	    %% move into accepting state N
+	    NewNxt = transition_table(N, Table),
+	    accept(Cs, acc(C, Acc), none_acc(), N, NewNxt, 
+		   Table, AcceptLimit, Start, Actions);
+	N ->
+	    NewNxt = transition_table(N, Table),
+	    pre_accept(Cs, acc(C, Acc), NewNxt, 
+		       Table, AcceptLimit, Start, Actions)
+    end;
+pre_accept("", Acc, _Nxt, _Table, _AcceptLimit, _Start, _Actions) ->
+    %% no match
+    no_match(Acc, "").
+
+%% [C|Cs] = lexed string
+%% Acc = accumulated token
+%% AccSt = previous accepted token
+%% N = FSM state number
+%% Nxt = state transition
+%% Table = lex table
+%% AcceptLimit = all states less than this are accepting
+%%
+%% If we enter an error state or the string ends, emit the current token
+%%  and match next token (if possible)
+%%
+%% If we stay in an accepting state, go on.
+%%
+%% If we get into a non-accepting state, save the current match and
+%%  go into post_accept
+
+accept([C|Cs]=Lst, Acc, AccSt, State, Nxt, 
+       Table, AcceptLimit, Start, Actions) ->
+    case next_state(C, Nxt) of
+	?no_match ->
+	    %% error state, so no further matching possible
+	    %% - emit current token, reset
+	    %% (note that AccSt is forgotten, since we now have a longer match)
+	    %%
+	    case emit_token(Actions, State, Acc) of
+		no_token ->
+		    longest_string(Start, Table, AcceptLimit, Actions, Lst);
+		{token, T} ->
+		    token(T, Lst)
+	    end;
+	N when ?is_accepting(N, AcceptLimit) ->
+	    %% still in accepting state, keep accumulating
+	    NewNxt = transition_table(N, Table),
+	    accept(Cs, acc(C, Acc), AccSt, N, NewNxt, 
+		   Table, AcceptLimit, Start, Actions);
+	N ->
+	    %% leaving accepting state, so save current token
+	    NewNxt = transition_table(N, Table),
+	    post_accept(Cs, acc(C, Acc), save_match(State, Acc, Lst), 
+			N, NewNxt,
+			Table, AcceptLimit, Start, Actions)
+    end;
+accept("", Acc, _AccSt, State, _Nxt, _Table, _AcceptLimit, _Start, Actions) ->
+    %% no more to lex and we are in an accepting state => emit token
+    %% and end
+    case emit_token(Actions, State, Acc) of
+	no_token ->
+	    end_of_stream;
+	{token, T} ->
+	    token(T, "")
+    end.
+
+%% We have been in an accepting state (stored in AccSt) and are
+%% now in a non-accepting state.
+%%
+%% If we enter an error state, or the string ends, emit the saved state 
+%% and continue from there. 
+%%
+%% If we enter an accepting state, jolly good. Go back to accept.
+%%
+%% Otherwise, keep going.
+
+post_accept([C|Cs]=_Lst, Acc, AccSt, _State, Nxt, 
+	    Table, AcceptLimit, Start, Actions) ->
+    case next_state(C, Nxt) of
+	?no_match ->
+	    %% no more matching possible, reset to saved token
+	    {State0, Acc0, Cs0} = reset_match(AccSt),
+	    case emit_token(Actions, State0, Acc0) of
+		no_token ->
+		    %% In this case, resume getting a token
+		    %% UNFINISHED - rename + rewrite params?
+		    longest_string(Start, Table, AcceptLimit, Actions, Cs0);
+		{token, T} ->
+		    token(T, Cs0)
+	    end;
+	N when ?is_accepting(N, AcceptLimit) ->
+	    %% we re-enter an accepting state
+	    NewNxt = transition_table(N, Table),
+	    accept(Cs, acc(C, Acc), AccSt, N, NewNxt,
+		   Table, AcceptLimit, Start, Actions);
+	N ->
+	    %% still in non-accepting state, keep searching
+	    NewNxt = transition_table(N, Table),
+	    post_accept(Cs, acc(C, Acc), AccSt, N, NewNxt,
+			Table, AcceptLimit, Start, Actions)
+    end;
+post_accept("", _Acc, AccSt, _State, _Nxt, Table, 
+	    AcceptLimit, Start, Actions) ->
+    %% no more matching, reset to saved token and continue from there
+    {State0, Acc0, Cs0} = reset_match(AccSt),
+    case emit_token(Actions, State0, Acc0) of
+	no_token ->
+	    longest_string(Start, Table, AcceptLimit, Actions, Cs0);
+	{token, T} ->
+	    token(T, Cs0)
+    end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -214,32 +444,6 @@ regexp_to_internal(N, {regexp2, Prio, Regexp_str, Action})
   when is_integer(Prio), Prio >= 0 ->
     {regexp, N, parse_regexp2(Regexp_str), Action, Prio}.
     
-%% ?max_char is currently used to decide the "charset size"
-%% we permit characters 0-?maxchar (excepting ?no_match,)
-
--define(max_char, 255).
-
-%% Possibly not needed, but for the sake of symmetry
-%%
-%% NOTE: currently,the code generator relies on doing "element" on
-%%  tuples, so we _can't_ handle  ?min_char = 0 ...
-
--define(min_char, 1).
-
-%% ?no_match is a reserved state indicating error/no match possible
-%%
-%% - when the table is represented as a tuple of tuples, we can have
-%%   ?no_match = -1
-%% - if the table is a binary, we would like to fit all characters into
-%%   an unsigned byte ... in that case, ?no_match can't be -1. Not sure
-%%   what it should be. (255?)
-
--define(no_match, -1).
-
-%% For compact tables, the value must be unsigned (which is a drawback).
-
--define(compact_no_match, 255).
-
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
 %% We currently handle a SUBSET of the regexps of Erlang/OTP:s regexp
@@ -1248,6 +1452,11 @@ no_match(RevAcc, Remainder) ->
 	  {line, current_line()},
 	  {accumulated, lists:reverse(RevAcc)}, 
 	  {remainder, RemLine}}).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+token(T, Cs0) ->
+    {token, T, Cs0}.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
