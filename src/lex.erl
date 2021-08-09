@@ -181,6 +181,10 @@
 -define(warning(Str, Xs), ok).
 -endif.
 
+%% quick patch
+-define(dbg(Str, Xs), io:format("~p:~p: " Str, [?MODULE, ?LINE | Xs])).
+%-define(dbg(Str, Xs). ok).
+
 %% Test for accepting state
 
 -define(is_accepting(N, AccLim), 
@@ -245,7 +249,9 @@ one(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions}, String) ->
 longest_string({lex, Start, AcceptLimit, Table, Actions}, String) 
   when is_list(String) -> 
     no_lines(),
-    longest_string(Start, Table, AcceptLimit, Actions, String).
+    longest_string(Start, Table, AcceptLimit, Actions, String);
+longest_string(_LEX, String) ->
+    exit({string_expected, String}).
 
 longest_string(_Start, _Table, _AcceptLimit, _Actions, "") ->
     end_of_stream;
@@ -1445,6 +1451,7 @@ no_match(RevAcc, Remainder) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 token(T, Cs0) ->
+    ?dbg("Token ~p\n", [T]),
     {token, T, Cs0}.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
