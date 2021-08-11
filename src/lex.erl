@@ -182,8 +182,8 @@
 -endif.
 
 %% quick patch
--define(dbg(Str, Xs), io:format("~p:~p: " Str, [?MODULE, ?LINE | Xs])).
-%-define(dbg(Str, Xs). ok).
+%-define(dbg(Str, Xs), io:format("~p:~p: " Str, [?MODULE, ?LINE | Xs])).
+-define(dbg(Str, Xs), ok).
 
 %% Test for accepting state
 
