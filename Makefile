@@ -1,5 +1,6 @@
 
 all:
+	mkdir -p ./ebin/
 	(cd src ; make all)
 
 clean:
