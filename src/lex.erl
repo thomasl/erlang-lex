@@ -88,8 +88,10 @@
 -author('thomasl_erlang@yahoo.com').
 -export(
    [one/2,
+    one/3,
     with/2,
-    with/3
+    with/3,
+    with/4
    ]).
 -export([o_with/2,
 	 regexps_to_table/1,
@@ -661,7 +663,7 @@ lex_iolist(LEX, Cur, Stack, Acc) ->
 %% Find the next token, skipping no_token matches.
 
 io_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL}, Cur, Stack) ->
-    case io_scan(Cur, Stack, Start, Table, AcceptLimit, 0, [], 0, 0, []) of
+    case io_eof(io_scan(Cur, Stack, Start, Table, AcceptLimit, 0, [], 0, 0, [])) of
 	{accept, State, Len, RevAcc} ->
 	    {Cur1, Stack1} = io_skip(Cur, Stack, Len),
 	    case emit_token(Actions, State, RevAcc) of
@@ -680,9 +682,12 @@ io_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL}, Cur, Stac
 %%         LastState, LastLen, LastRevAcc)
 %%   as scan/9 of the binary driver, reading from the cursor.
 %%
-%% Returns {accept, State, Len, RevAcc}, or {fail, N, at_end | stuck}:
-%% N bytes were read before the input ended (at_end) or the DFA got
-%% stuck or met an element that is not a byte (stuck).
+%% Returns {accept, State, Len, RevAcc}, or {fail, N, stuck}: N bytes
+%% were read before the DFA got stuck or met an element that is not a
+%% byte, or at the end of the data
+%%   {eof, State, N, RevAcc, LastState, LastLen, LastRevAcc}
+%% which io_eof/1 turns into one of the others (the incremental driver
+%% may instead get more data and resume the scan).
 
 io_scan([B | T], Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc)
   when is_integer(B), B >= 0, B =< 255 ->
@@ -700,8 +705,9 @@ io_scan([H | T], Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen
     io_scan(H, [T|Stack], State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc);
 io_scan([], [Next | Stack], State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
     io_scan(Next, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc);
-io_scan([], [], _State, _Table, _AcceptLimit, N, _RevAcc, LastState, LastLen, LastRevAcc) ->
-    io_done(at_end, N, LastState, LastLen, LastRevAcc);
+io_scan([], [], State, _Table, _AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
+    %% the end of the data: the incremental driver may get more and resume
+    {eof, State, N, RevAcc, LastState, LastLen, LastRevAcc};
 io_scan(Bin, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc)
   when is_binary(Bin) ->
     io_scan_b(Bin, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc);
@@ -720,6 +726,11 @@ io_scan_b(<<C, Rest/binary>>, Stack, State, Table, AcceptLimit, N, RevAcc, LastS
     end;
 io_scan_b(<<>>, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
     io_scan([], Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc).
+
+io_eof({eof, _State, N, _RevAcc, LastState, LastLen, LastRevAcc}) ->
+    io_done(at_end, N, LastState, LastLen, LastRevAcc);
+io_eof(Result) ->
+    Result.
 
 io_done(How, N, _LastState, 0, _LastRevAcc) ->
     {fail, N, How};
@@ -780,6 +791,177 @@ io_take([Bad | _], _Stack, _K, Acc) ->
     lists:reverse([Bad|Acc]);
 io_take(Bad, _Stack, _K, Acc) ->
     lists:reverse([Bad|Acc]).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%% Incremental driver
+%%
+%% Lexes a stream of data that arrives in chunks, e.g. from a socket.
+%% When the lexer runs out of data, it calls More(), which returns
+%%
+%%   {more, Data, Cont}  Data is the next chunk, and Cont the function to
+%%                       call when that runs out too; more may follow
+%%   {last, Data}        Data is the last chunk
+%%   ended               there is no more data
+%%
+%% Data is iodata. The lexer never calls a function again after it has
+%% returned {last, Data} or ended.
+%%
+%%   one(LEX, Data, More) -> {token, T, Rest, More1} | end_of_stream
+%%     Rest is the data fetched but not yet lexed (iodata), More1 the
+%%     function to call when that runs out: pass both to the next call.
+%%   with(Rules, Data, More, Opts) -> [T]
+%%
+%% This is the iolist driver, with one difference: when io_scan/10 gets
+%% to the end of the data, the scan has not failed yet. If More gives
+%% more data, the scan resumes with the same state where it stopped, so
+%% a token (or a UTF-8 character) can span chunks. The token start
+%% cursor is extended with each new chunk, so that the rest after the
+%% token, and the bytes of a failed token for error reports, can still
+%% be found. (Backtracking may thus also cross chunks.)
+%%
+%% By the longest-match rule a token that is complete at the end of the
+%% data may still grow, so the lexer must call More() before returning it
+%% (and More() may block). Not if the DFA state at the end of the token
+%% has no transitions at all: then no more data can extend it, and the
+%% token is returned at once, without calling More(). That way e.g. ";"
+%% or ")" at the end of a line typed by a user are returned right away.
+%%
+%% When lexing fails in a Unicode encoding, the error report needs the
+%% bytes after the failure to tell an invalid character from one that is
+%% merely incomplete so far, so the lexer then fetches up to 4 more bytes
+%% (see inc_fill/5).
+
+one(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, Data, More)
+  when is_function(More, 0) ->
+    try inc_longest(LEX, Data, [], More) of
+	{token, T, {Cur, Stack}, More1} ->
+	    {token, T, io_join(Cur, Stack), More1};
+	end_of_stream ->
+	    end_of_stream
+    catch
+	throw:{?MODULE, io_no_match, Cur, Stack, Len} ->
+	    io_report_no_match(Enc, NL, Cur, Stack, Len)
+    end.
+
+with(Regexp_rules, Data, More, Opts) when is_function(More, 0) ->
+    LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL} =
+	regexps_to_table(Regexp_rules, Opts),
+    no_lines(),
+    try lex_more(LEX, Data, [], More, [])
+    catch
+	throw:{?MODULE, io_no_match, Cur, Stack, Len} ->
+	    io_report_no_match(Enc, NL, Cur, Stack, Len)
+    end.
+
+lex_more(LEX, Cur, Stack, More, Acc) ->
+    case inc_longest(LEX, Cur, Stack, More) of
+	{token, T, {Cur1, Stack1}, More1} ->
+	    lex_more(LEX, Cur1, Stack1, More1, [T|Acc]);
+	end_of_stream ->
+	    lists:reverse(Acc)
+    end.
+
+%% Find the next token, skipping no_token matches. Returns
+%% {token, T, {Cur, Stack}, More} or end_of_stream.
+
+inc_longest(LEX = {lex, Start, _AcceptLimit, _Table, _Actions, _Enc, _NL}, Cur, Stack, More) ->
+    inc_scan(LEX, Cur, Stack, Cur, Stack, Start, 0, [], 0, 0, [], More).
+
+%% TokCur, TokStack: the cursor at the start of the token, extended with
+%% the chunks fetched since; Cur, Stack: where the scan is.
+
+inc_scan(LEX = {lex, _Start, AcceptLimit, Table, _Actions, _Enc, _NL},
+	 TokCur, TokStack, Cur, Stack, State, N, RevAcc, LastState, LastLen, LastRevAcc, More) ->
+    case io_scan(Cur, Stack, State, Table, AcceptLimit, N, RevAcc,
+		 LastState, LastLen, LastRevAcc) of
+	{eof, State1, N1, RevAcc1, LastState1, LastLen1, LastRevAcc1} = Eof ->
+	    case LastLen1 == N1 andalso N1 > 0 andalso dead_state(State1, Table) of
+		true ->
+		    %% the token cannot grow: no need for more data
+		    inc_done(LEX, TokCur, TokStack, io_eof(Eof), More);
+		false ->
+		    case next_data(More) of
+			{Data, More1} ->
+			    inc_scan(LEX, TokCur, TokStack ++ [Data], Data, [],
+				     State1, N1, RevAcc1, LastState1, LastLen1, LastRevAcc1,
+				     More1);
+			no_more ->
+			    inc_done(LEX, TokCur, TokStack, io_eof(Eof), fun no_more/0)
+		    end
+	    end;
+	Result ->
+	    inc_done(LEX, TokCur, TokStack, Result, More)
+    end.
+
+inc_done(LEX = {lex, _Start, _AcceptLimit, _Table, Actions, _Enc, _NL},
+	 TokCur, TokStack, Result, More) ->
+    case Result of
+	{accept, State, Len, RevAcc} ->
+	    {Cur1, Stack1} = io_skip(TokCur, TokStack, Len),
+	    case emit_token(Actions, State, RevAcc) of
+		no_token ->
+		    inc_longest(LEX, Cur1, Stack1, More);
+		{token, T} ->
+		    {token, T, {Cur1, Stack1}, More}
+	    end;
+	{fail, 0, at_end} ->
+	    end_of_stream;
+	{fail, Len, _} ->
+	    TokStack1 = inc_fill(LEX, TokCur, TokStack, Len + 4, More),
+	    throw({?MODULE, io_no_match, TokCur, TokStack1, Len})
+    end.
+
+%% Before reporting a failed token of Len bytes: in the Unicode encodings,
+%% make sure the 4 bytes after it (the longest character) have been
+%% fetched, or the stream has ended, or an element that is not a byte
+%% has been met, so that report_no_match/4 sees what the character
+%% there is. Returns the extended token Stack.
+
+inc_fill({lex, _Start, _AcceptLimit, _Table, _Actions, Enc, _NL}, _Cur, Stack, _Need, _More)
+  when Enc == bytes; Enc == latin1 ->
+    Stack;
+inc_fill(LEX, Cur, Stack, Need, More) ->
+    Have = io_take(Cur, Stack, Need, []),
+    Enough = length(Have) >= Need
+	orelse lists:any(fun(B) -> not (is_integer(B) andalso B >= 0 andalso B =< 255) end, Have),
+    case Enough of
+	true ->
+	    Stack;
+	false ->
+	    case next_data(More) of
+		{Data, More1} -> inc_fill(LEX, Cur, Stack ++ [Data], Need, More1);
+		no_more -> Stack
+	    end
+    end.
+
+%% Call More() for the next chunk: {Data, NextMore} or no_more.
+
+next_data(More) ->
+    case More() of
+	{more, Data, Cont} when is_function(Cont, 0) ->
+	    {Data, Cont};
+	{last, Data} ->
+	    {Data, fun no_more/0};
+	ended ->
+	    no_more;
+	Other ->
+	    exit({bad_more_result, Other})
+    end.
+
+no_more() ->
+    ended.
+
+%% true if State has no transitions: an accepted token ending in it
+%% cannot be extended
+
+dead_state(State, Table) ->
+    dead_row(element(State, Table), ?max_char + 1).
+
+dead_row(_Row, 0) ->
+    true;
+dead_row(Row, I) ->
+    element(I, Row) == ?no_match andalso dead_row(Row, I-1).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%

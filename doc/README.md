@@ -174,6 +174,15 @@ continues from the current position and does not reset it: call
 `no_lines()` before lexing a new input.
 
 ```erlang
+one(LexTable, Data, More) -> {token, Token, Rest, More1} | end_of_stream
+with(Rules, Data, More, Options) -> [Token]
+```
+
+Lex a stream that arrives in chunks: when the data runs out, the lexer
+calls `More()` for the next chunk. See
+[Incremental input](#incremental-input).
+
+```erlang
 o_with(Rules, String) -> [Token]
 o_longest(LexTable, String) -> [Token]
 ```
@@ -258,6 +267,88 @@ than `bytes`, `lex_no_match` in `bytes`.
 `with/2,3` raises `min_bin_vheap_size` (see [Binary input](#binary-input))
 to the size of the input while lexing a list, since binaries in it have
 the same effect on garbage collection as a single binary does.
+
+### Incremental input
+
+For data that arrives in chunks, e.g. from a socket or a file read a
+piece at a time, pass the data you have and a function `More`:
+
+```erlang
+lex:with(Rules, Data, More, Options) -> [Token]
+lex:one(LexTable, Data, More) -> {token, Token, Rest, More1} | end_of_stream
+```
+
+When the lexer runs out of data, it calls `More()`, which returns
+
+| Result | Meaning |
+|---|---|
+| `{more, Data, Cont}` | `Data` is the next chunk (iodata); more data may follow, and `Cont` is the function to call when this chunk runs out too |
+| `{last, Data}` | `Data` is the last chunk |
+| `ended` | there is no more data |
+
+Anything else exits with `{bad_more_result, Result}`. After `{last, Data}`
+or `ended` the lexer never calls a function again. `Data` may be empty.
+
+`one/3` returns the rest of the data it already has, `Rest`, and the
+function to call when that runs out, `More1`; pass both to the next call
+(after the stream has ended, `More1` just returns `ended`). As with
+`one/2`, call `no_lines()` before a new stream; `with/4` does that.
+
+Reading a socket:
+
+```erlang
+More = fun M() ->
+               case gen_tcp:recv(Socket, 0) of
+                   {ok, Data} -> {more, Data, M};
+                   {error, closed} -> ended
+               end
+       end,
+Tokens = lex:with(Rules, <<>>, More, [{encoding, utf8}])
+```
+
+Reading a file in 4 KB chunks (`lex_examples:from_file/1`):
+
+```erlang
+from_file(Name) ->
+    {ok, Fd} = file:open(Name, [read, binary, raw]),
+    More = fun M() ->
+                   case file:read(Fd, 4096) of
+                       {ok, Data} -> {more, Data, M};
+                       eof -> ended
+                   end
+           end,
+    try lex:with(ident_rules(), <<>>, More, [{encoding, utf8}])
+    after file:close(Fd)
+    end.
+```
+
+**When `More()` is called.** Only when the lexer has no data left. That
+may be in the middle of a token, or of a character: the lexer resumes
+where it stopped, so tokens, UTF-8 characters and the backtracking of
+longest match can all span chunks, and give exactly the same tokens,
+positions and errors as lexing the whole input at once (the tests check
+this on tens of thousands of random splits).
+
+By the longest-match rule, a token that is complete at the end of the
+available data might still continue in the next chunk, so the lexer
+calls `More()` before returning it, and `More()` may block (e.g. in
+`gen_tcp:recv/2`). With an interactive source, a word or a number at the
+end of a line is therefore returned when the next data arrives (or the
+stream ends). There is one exception: if no further byte can extend the
+token (its DFA state has no transitions), as for `;` or `)`, the token is
+returned at once, without calling `More()`. Ending lines with a newline
+token rule (e.g. `{regexp, "\n", ...}`) also helps, since a newline is
+usually one of those.
+
+When lexing fails in a Unicode encoding, telling an invalid character
+from one that is only incomplete so far needs the bytes after it, so the
+lexer fetches up to 4 more bytes with `More()` before reporting the
+error.
+
+The incremental driver does not adjust the garbage collection settings
+(see [Binary input](#binary-input)), since it does not know the size of
+the input in advance. Chunks are usually small, so this matters only if
+they are larger than a few hundred KB.
 
 ### Token helpers
 
@@ -904,10 +995,12 @@ Syntax and semantics of the classes:
 - **Large binaries and garbage collection**: `with/2,3` adjusts the
   process's GC settings while it lexes a binary, see
   [Binary input](#binary-input); with `one/2` that is up to the caller.
-- **Incremental input.** `one/2` returns one token at a time but needs
-  the whole input: there is no resumable state for input that arrives
-  in chunks. A chunk that ends in the middle of a character (or a
-  token) is an error. Future work: return a continuation.
+- **Incremental input** works by calling a function for more data
+  ([Incremental input](#incremental-input)), which may block: the lexer
+  cannot return "need more data" to a caller that wants to wait for it
+  some other way, such as an `active` socket's messages in a
+  `gen_server`. Future work: return a continuation instead. Also, a
+  token that could still grow is only returned when more data arrives.
 - **No match** stops lexing with an exception; there is no built-in
   recovery (`lex`/`flex` echo and skip the character). Add a catch-all
   rule if needed.

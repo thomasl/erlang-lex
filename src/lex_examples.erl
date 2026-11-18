@@ -14,7 +14,8 @@
          tokens_one_by_one/1,
          safe_lex/1,
          positions/1,
-         iodata/1]).
+         iodata/1,
+         from_file/1]).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% 1. A calculator lexer in the default (bytes) encoding.
@@ -186,3 +187,20 @@ at(Tag) -> fun(Acc) -> {token, {Tag, lex:current_position(), lists:reverse(Acc)}
 
 iodata(IoData) ->
     lex:with(ident_rules(), IoData, [{encoding, utf8}]).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% 11. Incremental input: lex a file read in 4 KB chunks, as in
+%%     doc/README.md, "Incremental input". Tokens and characters may span
+%%     chunks.
+
+from_file(Name) ->
+    {ok, Fd} = file:open(Name, [read, binary, raw]),
+    More = fun M() ->
+                   case file:read(Fd, 4096) of
+                       {ok, Data} -> {more, Data, M};
+                       eof -> ended
+                   end
+           end,
+    try lex:with(ident_rules(), <<>>, More, [{encoding, utf8}])
+    after file:close(Fd)
+    end.

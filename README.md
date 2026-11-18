@@ -22,6 +22,8 @@ with the highest priority wins, then the earliest rule.
   input with a precise error.
 - Binaries and iolists (nested lists of bytes and binaries) are lexed in
   place, without flattening or converting them.
+- Incremental lexing of data that arrives in chunks (sockets, files):
+  the lexer calls a function for more data when it runs out.
 - Named Unicode classes in Perl syntax (`\p{L}`, `\p{Greek}`,
   `\p{sc=Grek}`, `\p{InCyrillic}`, `\p{XID_Start}`, `\P{...}`), `\d \s \w`,
   `\x{1F600}`.

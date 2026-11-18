@@ -706,3 +706,144 @@ iolist_bad_elements_test_() ->
      ?_assertEqual(bad(utf8, not_a_byte, 3, [bar]), U([$c, $d | bar])),
      ?_assertEqual({'EXIT', {lex_no_match, {line, 1}, {column, 3}}}, B([<<"cd">>, 300])),
      ?_assertEqual({'EXIT', {lex_no_match, {line, 1}, {column, 1}}}, B([foo]))].
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Incremental driver
+
+%% A More function giving Chunks, then ending with {last, C} or ended.
+%% Each function fails if it is called twice, and the last one if it is
+%% called at all after the stream ended.
+more_from(Chunks, Ending) ->
+    once(fun() -> more_result(Chunks, Ending) end).
+
+more_result([], _Ending) -> ended;
+more_result([C], last) -> {last, C};
+more_result([C | Cs], Ending) -> {more, C, more_from(Cs, Ending)}.
+
+once(F) ->
+    Ref = make_ref(),
+    fun() ->
+            case get(Ref) of
+                undefined -> put(Ref, called), F();
+                called -> exit(more_called_twice)
+            end
+    end.
+
+%% Random chunks of 0-7 bytes, each as a binary or a random iolist
+random_chunks(<<>>) ->
+    case rand:uniform(3) of
+        1 -> [];
+        _ -> [<<>>]
+    end;
+random_chunks(Bin) ->
+    N = min(byte_size(Bin), rand:uniform(8) - 1),
+    <<C:N/binary, Rest/binary>> = Bin,
+    Chunk = case rand:uniform(2) of 1 -> C; 2 -> random_iolist(C) end,
+    [Chunk | random_chunks(Rest)].
+
+pull_more(Lex, Data, More, Acc) ->
+    case lex:one(Lex, Data, More) of
+        {token, T, Rest, More1} -> pull_more(Lex, Rest, More1, [T | Acc]);
+        end_of_stream -> lists:reverse(Acc)
+    end.
+
+%% Lexing in chunks gives the same as lexing the whole input: tokens,
+%% positions and errors, with tokens, characters and backtracking
+%% spanning chunks
+incremental_equivalence_test_() ->
+    {timeout, 120,
+     fun() ->
+             rand:seed(exsss, {3, 14, 15}),
+             [ begin
+                   Rules = driver_rules(Enc),
+                   Opts = [{encoding, Enc}],
+                   Bin = random_input(Enc),
+                   Whole = caught(fun() -> lex:with(Rules, Bin, Opts) end),
+                   Ending = lists:nth(rand:uniform(2), [last, ended]),
+                   {First, Chunks} = case random_chunks(Bin) of
+                                         [C | Cs] when Ending == ended; Cs =/= [] -> {C, Cs};
+                                         Cs -> {[], Cs}
+                                     end,
+                   Stream = caught(fun() -> lex:with(Rules, First, more_from(Chunks, Ending), Opts) end),
+                   ?assertEqual({Enc, Bin, Chunks, Whole}, {Enc, Bin, Chunks, Stream}),
+                   Pulled = caught(fun() ->
+                                           Lex = lex:regexps_to_table(Rules, Opts),
+                                           lex:no_lines(),
+                                           pull_more(Lex, First, more_from(Chunks, Ending), [])
+                                   end),
+                   ?assertEqual({Enc, Bin, Chunks, Whole}, {Enc, Bin, Chunks, Pulled})
+               end || Enc <- [bytes, latin1 | ?ENCODINGS], _ <- lists:seq(1, 500) ]
+     end}.
+
+incremental_more_test_() ->
+    Rules = [{regexp, "\\p{L}+", lex:item(w)}, {regexp, ";", lex:token(semi)},
+             {regexp, "\\s+", lex:whitespace()}],
+    Lex = lex:regexps_to_table(Rules, [{encoding, utf8}]),
+    Boom = fun() -> exit(more_called) end,
+    One = fun(Data, More) -> lex:no_lines(), caught(fun() -> lex:one(Lex, Data, More) end) end,
+    [%% a token that cannot grow is returned without calling More
+     ?_assertMatch({token, {semi, 1}, <<>>, _}, One(<<";">>, Boom)),
+     ?_assertMatch({token, {w, 1, "a"}, <<";">>, _}, One(<<"a;">>, Boom)),
+     %% one that could grow needs More
+     ?_assertEqual({'EXIT', more_called}, One(<<"a">>, Boom)),
+     ?_assertMatch({token, {w, 1, "ab"}, <<>>, _}, One(<<"a">>, fun() -> {last, <<"b">>} end)),
+     %% so does whitespace at the end (after "a" and ";" were returned
+     %% without More: each is followed by a byte that ends it)
+     ?_assertMatch({token, {semi, 1}, <<" ">>, _}, One(<<"; ">>, Boom)),
+     ?_assertEqual({'EXIT', more_called}, One(<<" ">>, Boom)),
+     %% an empty start
+     ?_assertEqual(end_of_stream, One(<<>>, fun() -> ended end)),
+     ?_assertEqual(end_of_stream, One([[], <<>>], fun() -> {last, <<"  ">>} end)),
+     %% empty chunks are fine
+     ?_assertMatch({token, {w, 1, "ab"}, _, _},
+                   One(<<"a">>, more_from([<<>>, [], <<"b">>, <<>>], ended))),
+     %% the continuation after the stream ended returns end
+     ?_assertEqual(ended, begin
+                              {token, _, _, M} = One(<<"a">>, fun() -> {last, <<" b">>} end),
+                              M()
+                          end),
+     %% a More function must return one of the three forms
+     ?_assertEqual({'EXIT', {bad_more_result, eof}}, One(<<"a">>, fun() -> eof end)),
+     %% positions and errors continue across chunks
+     ?_assertEqual({'EXIT', {lex_bad_encoding, utf8, invalid, {line, 2}, {column, 2}, {bytes, [16#FF]}}},
+                   caught(fun() -> lex:with(Rules, <<"a\n">>, more_from([<<"b">>, <<16#FF>>], ended),
+                                            [{encoding, utf8}]) end)),
+     %% a bad character at the end of a chunk: the next chunk decides
+     %% whether it is invalid or incomplete
+     ?_assertEqual({'EXIT', {lex_bad_encoding, utf8, invalid, {line, 1}, {column, 1}, {bytes, [16#D8, 0]}}},
+                   caught(fun() -> lex:with(Rules, [16#D8], more_from([<<0>>], ended),
+                                            [{encoding, utf8}]) end)),
+     ?_assertEqual({'EXIT', {lex_bad_encoding, utf8, incomplete, {line, 1}, {column, 2}, {bytes, [16#E2, 16#82]}}},
+                   caught(fun() -> lex:with(Rules, <<"a", 16#E2>>, more_from([<<16#82>>, <<>>], last),
+                                            [{encoding, utf8}]) end)),
+     ?_assertEqual({'EXIT', {lex_no_match, {line, 1}, {column, 4}}},
+                   caught(fun() -> lex:with(Rules, <<"ab">>, more_from([<<" ">>, <<"?">>], last),
+                                            [{encoding, utf8}]) end))].
+
+%% A real stream: lexing from a TCP socket, as the data arrives in
+%% separate writes (with a word and a UTF-8 character split between them)
+socket_test() ->
+    {ok, L} = gen_tcp:listen(0, [binary, {active, false}, {ip, loopback}]),
+    {ok, Port} = inet:port(L),
+    Writes = [<<"hello wo">>, <<"rld; ">>, <<"λ"/utf8, 16#CE>>, <<16#BC, ";\n">>, <<"x">>],
+    spawn_link(fun() ->
+                       {ok, S} = gen_tcp:connect({127, 0, 0, 1}, Port, [binary]),
+                       [ begin ok = gen_tcp:send(S, W), timer:sleep(20) end || W <- Writes ],
+                       ok = gen_tcp:close(S)
+               end),
+    {ok, Sock} = gen_tcp:accept(L, 5000),
+    More = fun M() ->
+                   case gen_tcp:recv(Sock, 0, 5000) of
+                       {ok, Data} -> {more, Data, M};
+                       {error, closed} -> ended
+                   end
+           end,
+    Rules = [{regexp, "\\p{L}+", fun(Acc) -> {token, {w, lex:current_position(), lists:reverse(Acc)}} end},
+             {regexp, ";", fun(_) -> {token, {semi, lex:current_position()}} end},
+             {regexp, "\\s+", lex:whitespace()}],
+    Tokens = lex:with(Rules, <<>>, More, [{encoding, utf8}]),
+    gen_tcp:close(Sock),
+    gen_tcp:close(L),
+    ?assertEqual([{w, {1, 1}, "hello"}, {w, {1, 7}, "world"}, {semi, {1, 12}},
+                  {w, {1, 14}, "λμ"}, {semi, {1, 16}}, {w, {2, 1}, "x"}],
+                 Tokens).

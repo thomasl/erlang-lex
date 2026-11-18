@@ -6,7 +6,7 @@
 
 -import(lex_examples, [calc/1, config/1, idents/1, sql/1, utf16_file/1,
                        scripts/1, tokens_one_by_one/1, safe_lex/1, positions/1,
-                       iodata/1]).
+                       iodata/1, from_file/1]).
 
 calc_test() ->
     ?assertEqual([{num, 1, "12"}, {'+', 1}, {'(', 1}, {num, 1, "3"}, {'*', 1},
@@ -49,3 +49,25 @@ positions_test() ->
 iodata_test() ->
     ?assertEqual([{ident, 1, "λx"}, {'=', 1}, {num, 1, "42"}, {'+', 1}, {num, 1, "1"}],
                  iodata([<<"λx = "/utf8>>, ["42", $\s], [[<<"+ 1">>]]])).
+
+%% A file of about 100 KB, read in 4 KB chunks: words and multibyte
+%% characters are split between chunks
+from_file_test() ->
+    Line = <<"λx = \"naïve\" + ٣٤ 中文\n"/utf8>>,
+    Text = binary:copy(Line, 3000),
+    Name = filename:join(temp_dir(), "lex_examples_from_file_test.txt"),
+    ok = file:write_file(Name, Text),
+    try
+        Tokens = from_file(Name),
+        ?assertEqual(lex:with(lex_examples:ident_rules(), Text, [{encoding, utf8}]), Tokens),
+        ?assertEqual(6 * 3000, length(Tokens)),
+        ?assertEqual({ident, 3000, "中文"}, lists:last(Tokens))
+    after
+        file:delete(Name)
+    end.
+
+temp_dir() ->
+    case os:getenv("TMPDIR") of
+        false -> "/tmp";
+        Dir -> Dir
+    end.
