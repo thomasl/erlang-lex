@@ -134,9 +134,10 @@ with(Rules, Input) -> [Token]
 with(Rules, Input, Options) -> [Token]
 ```
 
-Build a table from `Rules` and lex all of `Input` (a binary or a list).
-Resets the position to line 1, column 1 first. Exits on errors (see
-[Errors](#errors)).
+Build a table from `Rules` and lex all of `Input`, a binary or a list.
+A binary is lexed directly by the [binary driver](#binary-input), a list
+by the list driver; both give the same tokens. Resets the position to
+line 1, column 1 first. Exits on errors (see [Errors](#errors)).
 
 ```erlang
 regexps_to_table(Rules) -> LexTable
@@ -160,12 +161,13 @@ Errors in the rules exit here, see [Errors](#errors). The table is
 one(LexTable, Input) -> {token, Token, Rest} | end_of_stream
 ```
 
-Return the next token and the rest of the input (as a list of bytes),
-or `end_of_stream` when only skipped text (`no_token`) remains. This is
-the interface for a parser that pulls tokens one at a time
-([example 7](#7-pulling-tokens-one-at-a-time)). `one/2` continues from
-the current position and does not reset it: call `no_lines()` before
-lexing a new input.
+Return the next token and the rest of the input, or `end_of_stream`
+when only skipped text (`no_token`) remains. The rest has the same form
+as `Input`: for a binary, a sub-binary of it (nothing is copied); for a
+list, a list. This is the interface for a parser that pulls tokens one
+at a time ([example 7](#7-pulling-tokens-one-at-a-time)). `one/2`
+continues from the current position and does not reset it: call
+`no_lines()` before lexing a new input.
 
 ```erlang
 o_with(Rules, String) -> [Token]
@@ -175,6 +177,42 @@ o_longest(LexTable, String) -> [Token]
 The older, non-incremental driver, kept for compatibility (`String` must
 be a list). Equivalent to `with/2`; `o_longest/2` also resets the
 position.
+
+### Binary input
+
+A binary is lexed in place, without converting it to a list (which
+takes 16 bytes of memory per input byte). The binary driver reads the
+input a byte at a time through a binary match that the compiler turns
+into a reused match context, so reading a byte allocates nothing; only
+the bytes of the token being read are collected, as a list, which is
+what actions get. Tokens, positions and errors are the same as for a
+list (the tests check this on thousands of random inputs).
+
+**Garbage collection.** For a large binary, two settings of the
+process doing the lexing matter:
+
+- `min_bin_vheap_size`: a binary larger than this (default 46422 words,
+  371 KB) that the process keeps referring to, as the lexer does with
+  its input, makes nearly every garbage collection a full one, which
+  copies all the tokens made so far. For a 1 MB input that made lexing
+  about 3 times slower.
+- `min_heap_size`: the heap otherwise has to grow step by step as the
+  token list grows.
+
+`with/2,3` raises both for the duration of the call, to twice the size
+of the binary and to 2 words per input byte (each at most 16M words, or
+128 MB), and then restores them. `one/2` cannot do this, since it returns
+after each token; when pulling tokens from a large binary, raise the
+limits around the loop yourself:
+
+```erlang
+Words = byte_size(Bin) div erlang:system_info(wordsize),
+Old = process_flag(min_bin_vheap_size, 2 * Words),
+try pull(Lex, Bin, []) after process_flag(min_bin_vheap_size, Old) end
+```
+
+or lex in a process spawned with
+`spawn_opt(Fun, [{min_bin_vheap_size, 2 * Words}])`.
 
 ### Token helpers
 
@@ -600,8 +638,10 @@ end symbol yourself.
    to "no match".
 8. **Driving.** The driver reads one byte at a time, remembers the last
    accepting position, and on getting stuck emits the longest match and
-   restarts after it (backtracking if needed, see below). In the Unicode
-   encodings the action gets the token decoded into code points.
+   restarts after it (backtracking if needed, see below). There are two
+   drivers with the same behaviour, for lists and for binaries (see
+   [Binary input](#binary-input)). In the Unicode encodings the action
+   gets the token decoded into code points.
 
 Steps 4-8 are independent of the encoding: Unicode is entirely handled
 in steps 2 and 3, and by the decoding of tokens and errors in step 8.
@@ -622,8 +662,22 @@ Measured in 2026 on an Apple M4 with Erlang/OTP 29:
 | same | `utf32be` | 253 | 3 ms |
 | same | `utf32le` | 575 | 133 ms |
 
-Lexing 660 KB of mixed Greek, CJK and ASCII UTF-8 text into 100,000
-tokens with the identifier lexer took 51 ms (about 13 MB/s).
+Lexing about 1 MB with `with/3` in a new process, including building
+the table, with the identifier lexer above (or, for `bytes`, an ASCII
+version of it), as a binary and as a list (`binary_to_list/1` of the
+same binary):
+
+| Input | Bytes | Tokens | Binary | List |
+|---|---|---|---|---|
+| `bytes`, ASCII text | 1,000,000 | 250,000 | 35 ms, 39 MB | 47 ms, 47 MB |
+| `utf8`, ASCII text | 1,000,000 | 250,000 | 60 ms, 63 MB | 68 ms, 49 MB |
+| `utf8`, Greek, CJK and ASCII | 990,000 | 150,000 | 40 ms, 35 MB | 49 ms, 33 MB |
+| `utf16le`, Greek, CJK and ASCII | 1,320,000 | 150,000 | 89 ms, 50 MB | 93 ms, 46 MB |
+
+(The memory is that of the lexing process afterwards; most of it is the
+tokens, plus the list of the input for a list.) That is 10-30 MB/s. The
+time is mostly spent per token, on the actions and on keeping track of
+the position, rather than per byte.
 
 A table takes about 257 words (2 KB) per state, so the tables above
 are 0.3-1.3 MB. Little-endian encodings give bigger tables, since the
@@ -798,9 +852,9 @@ Syntax and semantics of the classes:
 - **Regexp language**: no anchors, empty alternatives, counted
   repetition `{n,m}`, or `"quoted strings"`; see
   [syntax.md](syntax.md#9-not-supported).
-- **Input** is converted to a list of bytes, so a large binary takes
-  about 16 bytes of memory per input byte while lexing. Lexing directly
-  on binaries would be faster and smaller.
+- **Large binaries and garbage collection**: `with/2,3` adjusts the
+  process's GC settings while it lexes a binary, see
+  [Binary input](#binary-input); with `one/2` that is up to the caller.
 - **Incremental input.** `one/2` returns one token at a time but needs
   the whole input: there is no resumable state for input that arrives
   in chunks. A chunk that ends in the middle of a character (or a

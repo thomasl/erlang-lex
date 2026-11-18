@@ -20,6 +20,7 @@ with the highest priority wins, then the earliest rule.
 - Input as bytes, Latin-1, UTF-8, UTF-16 LE/BE or UTF-32 LE/BE. The
   lexer reads one byte at a time and rejects malformed or truncated
   input with a precise error.
+- Binaries are lexed in place, without converting them to lists.
 - Named Unicode classes in Perl syntax (`\p{L}`, `\p{Greek}`,
   `\p{sc=Grek}`, `\p{InCyrillic}`, `\p{XID_Start}`, `\P{...}`), `\d \s \w`,
   `\x{1F600}`.

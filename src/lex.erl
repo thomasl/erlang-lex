@@ -214,16 +214,22 @@ with(Regexp_rules, Str) ->
 
 %% Options: see regexps_to_table/2. Input is a binary or a list of bytes
 %% (in the legacy 'bytes' encoding, a list of chars 0..255 as before).
+%% A binary is lexed by the binary driver (see "Binary driver" below),
+%% a list by the list driver; both give the same tokens.
 
-with(Regexp_rules, Input, Opts) ->
-    LEX  = regexps_to_table(Regexp_rules, Opts),
+with(Regexp_rules, Bin, Opts) when is_binary(Bin) ->
+    %% see "Garbage collection" under "Binary driver"
+    with_gc_limits(
+      Bin,
+      fun() ->
+	      LEX = regexps_to_table(Regexp_rules, Opts),
+	      no_lines(),
+	      lex_binary(LEX, Bin)
+      end);
+with(Regexp_rules, List, Opts) when is_list(List) ->
+    LEX = regexps_to_table(Regexp_rules, Opts),
     no_lines(),
-    lex_string(LEX, input_list(Input)).
-
-input_list(Bin) when is_binary(Bin) ->
-    binary_to_list(Bin);
-input_list(List) when is_list(List) ->
-    List.
+    lex_string(LEX, List).
 
 %% (testing: convert file to string)
 f(File) ->
@@ -264,12 +270,13 @@ lex_string(LEX, Str, Acc) ->
 %%  ... or exits with {lex_no_match, ...} or (for the Unicode encodings)
 %%  {lex_bad_encoding, ...}, see report_no_match/3.
 %%
-%% The input is a binary or a list of bytes. In the Unicode encodings,
-%% the rest string returned is also a list of bytes, and the action
-%% receives the token as a (reversed) list of code points.
+%% The input is a binary or a list of bytes, and the rest is returned in
+%% the same form: a binary (a sub-binary of the input, see "Binary
+%% driver") or a list. In the Unicode encodings the action receives the
+%% token as a (reversed) list of code points.
 
 one(LEX, Bin) when is_binary(Bin) ->
-    one(LEX, binary_to_list(Bin));
+    one_binary(LEX, Bin);
 one(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, String) ->
     try longest_string(LEX, String)
     catch
@@ -429,6 +436,148 @@ post_accept("", _Acc, AccSt, _State, _Nxt, Table,
 	{token, T} ->
 	    token(T, Cs0)
     end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%% Binary driver
+%%
+%% Lexes a single binary directly, without converting it to a list.
+%% Same longest-match semantics, actions, positions and errors as the
+%% list driver:
+%%
+%%   one_binary(LEX, Bin) -> {token, T, Rest} | end_of_stream
+%%     Rest is a sub-binary of Bin (no copying).
+%%   lex_binary(LEX, Bin) -> [T]
+%%
+%% scan/9 walks the binary a byte at a time with a binary match on its
+%% tail, which the compiler turns into a match context that is reused
+%% from byte to byte. Like the list driver, it collects the bytes read
+%% so far as a reversed list (which is what actions get), and remembers
+%% the state, length and byte list of the longest accepting prefix so
+%% far. When the DFA gets stuck or the input ends, that prefix is the
+%% token; the input is then restarted after it, which is the
+%% backtracking of the list driver. (Taking the token as a sub-binary and
+%% converting it afterwards was measured to be slower, in particular for
+%% UTF-16 and UTF-32.)
+
+one_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, Bin) ->
+    try bin_longest(LEX, Bin)
+    catch
+	throw:{?MODULE, bin_no_match, Bin1, Len} ->
+	    bin_report_no_match(Enc, NL, Bin1, Len)
+    end.
+
+%% Garbage collection. Lexing a whole binary builds a list of tokens
+%% about as large as the input, with many garbage collections on the way.
+%% Two process settings matter, and with/2,3 raises both for the
+%% duration of the call, including building the table (then restores
+%% them), see with_gc_limits/2:
+%%
+%% - min_bin_vheap_size: the input binary is referenced from the old
+%%   heap, and counts against its "virtual binary heap". If the binary is
+%%   larger than that limit (default 46422 words, 371 KB), nearly every
+%%   collection becomes a full one, copying all tokens so far: for a 1 MB
+%%   input this made lexing about 3 times slower. Raised to twice the
+%%   size of the binary.
+%% - min_heap_size: raised to 2 words per input byte, so the heap does not
+%%   have to grow step by step (the list driver gets this for free, since
+%%   its input list is already that large).
+%%
+%% Both are capped at 16M words (128 MB). With them, lexing a 1 MB binary
+%% in a new process is as fast as or faster than lexing it as a list, and
+%% uses less memory. one/2 cannot do this, since it returns after each
+%% token; see doc/README.md for doing it around a one/2 loop.
+
+-define(heap_words_per_byte, 2).
+-define(max_gc_hint, 16#1000000).
+
+with_gc_limits(Bin, Fun) ->
+    Words = byte_size(Bin) div erlang:system_info(wordsize) + 1,
+    Restore = raise_gc_limits([{min_bin_vheap_size, 2 * Words},
+			       {min_heap_size, ?heap_words_per_byte * byte_size(Bin)}]),
+    try Fun()
+    after
+	[ process_flag(Flag, Old) || {Flag, Old} <- Restore ]
+    end.
+
+lex_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, Bin) ->
+    try lex_binary(LEX, Bin, [])
+    catch
+	throw:{?MODULE, bin_no_match, Bin1, Len} ->
+	    bin_report_no_match(Enc, NL, Bin1, Len)
+    end.
+
+%% Raise each process flag to at least Value (capped); returns the
+%% [{Flag, OldValue}] to restore.
+
+raise_gc_limits(Limits) ->
+    [ {Flag, process_flag(Flag, New)}
+      || {Flag, Value} <- Limits,
+	 New <- [min(Value, ?max_gc_hint)],
+	 New > element(2, process_info(self(), Flag)) ].
+
+lex_binary(LEX, Bin, Acc) ->
+    case bin_longest(LEX, Bin) of
+	{token, T, Rest} ->
+	    lex_binary(LEX, Rest, [T|Acc]);
+	end_of_stream ->
+	    lists:reverse(Acc)
+    end.
+
+%% Find the next token, skipping no_token matches.
+
+bin_longest(_LEX, <<>>) ->
+    end_of_stream;
+bin_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL}, Bin) ->
+    case scan(Bin, Start, Table, AcceptLimit, 0, [], 0, 0, []) of
+	{accept, State, Len, RevAcc} ->
+	    <<_:Len/binary, Rest/binary>> = Bin,
+	    case emit_token(Actions, State, RevAcc) of
+		no_token ->
+		    bin_longest(LEX, Rest);
+		{token, T} ->
+		    token(T, Rest)
+	    end;
+	{fail, Len} ->
+	    throw({?MODULE, bin_no_match, Bin, Len})
+    end.
+
+%% scan(Bin, State, Table, AcceptLimit, N, RevAcc,
+%%      LastState, LastLen, LastRevAcc)
+%%   N = bytes read so far, RevAcc = those bytes reversed;
+%%   LastState/LastLen/LastRevAcc = the longest accepting prefix so far
+%%   (LastLen = 0: none yet; rules never match the empty string).
+%%
+%% Returns {accept, State, Len, RevAcc}, or {fail, N} with N the number
+%% of bytes read before the DFA got stuck (or the input ended).
+
+scan(<<C, Rest/binary>>, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
+    case element(C+1, element(State, Table)) of
+	?no_match ->
+	    scan_done(N, LastState, LastLen, LastRevAcc);
+	Next when ?is_accepting(Next, AcceptLimit) ->
+	    Acc = [C|RevAcc],
+	    scan(Rest, Next, Table, AcceptLimit, N+1, Acc, Next, N+1, Acc);
+	Next ->
+	    scan(Rest, Next, Table, AcceptLimit, N+1, [C|RevAcc], LastState, LastLen, LastRevAcc)
+    end;
+scan(<<>>, _State, _Table, _AcceptLimit, N, _RevAcc, LastState, LastLen, LastRevAcc) ->
+    scan_done(N, LastState, LastLen, LastRevAcc).
+
+scan_done(N, _LastState, 0, _LastRevAcc) ->
+    {fail, N};
+scan_done(_N, LastState, LastLen, LastRevAcc) ->
+    {accept, LastState, LastLen, LastRevAcc}.
+
+%% Errors are reported as by the list driver. report_no_match/4 needs the
+%% bytes of the failed token and a few more: a malformed character that
+%% starts at or before the failing byte is at most 4 bytes long.
+
+bin_report_no_match(Enc, NL, Bin, Len) ->
+    <<Acc:Len/binary, Rest/binary>> = Bin,
+    More = binary:part(Rest, 0, min(byte_size(Rest), 8)),
+    report_no_match(Enc, NL, lists:reverse(binary_to_list(Acc)),
+		    binary_to_list(More)).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -1784,6 +1933,9 @@ regexp_actions(Regexp_rules, Enc, NL) ->
 %% a reversed string in bytes/latin1 mode. A token is always
 %% well-formed (the DFA only accepts complete, valid sequences).
 
+%%
+%% Both drivers pass the token as a reversed list of bytes.
+
 position_action(Enc, NL, Action) when Enc == bytes; Enc == latin1 ->
     fun(RevChars) ->
 	    Result = Action(RevChars),
@@ -1896,17 +2048,26 @@ current_position() ->
     {Line, Col}.
 
 %% advance({Line, Col, AfterCR}, Chars, NL) -> {Line, Col, AfterCR}
+%%
+%% This runs over every character of the input, so adv/5 keeps the
+%% position in arguments rather than a tuple, and the first clause
+%% handles the common case: no line terminator is above CR and below NEL.
 
-advance(Pos, [], _NL) ->
-    Pos;
-advance({Line, Col, true}, [$\n | Cs], NL) ->
+advance({Line, Col, AfterCR}, Chars, NL) ->
+    adv(Chars, Line, Col, AfterCR, NL).
+
+adv([C | Cs], Line, Col, _AfterCR, NL) when C > $\r, C < 16#85 ->
+    adv(Cs, Line, Col+1, false, NL);
+adv([$\n | Cs], Line, Col, true, NL) ->
     %% the LF of a CR LF
-    advance({Line, Col, false}, Cs, NL);
-advance({Line, Col, _}, [C | Cs], NL) ->
+    adv(Cs, Line, Col, false, NL);
+adv([C | Cs], Line, Col, _AfterCR, NL) ->
     case is_line_terminator(C, NL) of
-	true -> advance({Line+1, 1, C == $\r}, Cs, NL);
-	false -> advance({Line, Col+1, false}, Cs, NL)
-    end.
+	true -> adv(Cs, Line+1, 1, C == $\r, NL);
+	false -> adv(Cs, Line, Col+1, false, NL)
+    end;
+adv([], Line, Col, AfterCR, _NL) ->
+    {Line, Col, AfterCR}.
 
 is_line_terminator($\n, _NL) -> true;
 is_line_terminator(_C, lf) -> false;

@@ -207,7 +207,10 @@ one_test() ->
     Lex = lex:regexps_to_table(rules(), [{encoding, utf8}]),
     Bin = unicode:characters_to_binary("λx 1"),
     {token, {ident, _, "λx"}, Rest} = lex:one(Lex, Bin),
-    ?assertEqual(" 1", Rest).
+    ?assertEqual(<<" 1">>, Rest),
+    %% a list in, a list out
+    {token, {ident, _, "λx"}, RestL} = lex:one(Lex, binary_to_list(Bin)),
+    ?assertEqual(" 1", RestL).
 
 %% Byte 0 is an ordinary byte (UTF-16/32 need it; latin1 allows NUL)
 nul_test() ->
@@ -494,7 +497,7 @@ one_position_test() ->
     Lex = lex:regexps_to_table(pos_rules(utf8), [{encoding, utf8}]),
     lex:no_lines(),
     {token, {w, {1, 1}, "λ"}, R1} = lex:one(Lex, <<"λ\n μ"/utf8>>),
-    {token, {w, {2, 2}, "μ"}, []} = lex:one(Lex, R1),
+    {token, {w, {2, 2}, "μ"}, <<>>} = lex:one(Lex, R1),
     ?assertEqual({2, 3}, lex:current_position()),
     ?assertEqual(2, lex:current_line()),
     ?assertEqual(3, lex:current_column()),
@@ -513,3 +516,93 @@ count_lines_test() ->
     ?assertEqual(0, lex:count_lines([$a, 16#2028, $b])),
     ?assertEqual(2, lex:count_lines([$a, 16#2028, $b, 16#85], unicode)),
     ?assertEqual(0, lex:count_lines("")).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% The binary driver and the list driver give the same results
+
+%% Rules with backtracking ("a*b" vs "a"), multi-line tokens, and room
+%% for both no-match and encoding errors.
+driver_rules(bytes) ->
+    [{regexp, "a", at(a)}, {regexp, "a*b", at(ab)}, {regexp, "[c-e]+", at(w)},
+     {regexp, "\"[^\"]*\"", at(s)}, {regexp, "[ \n\r]", lex:whitespace()}];
+driver_rules(_Enc) ->
+    [{regexp, "a", at(a)}, {regexp, "a*b", at(ab)}, {regexp, "[c-eλ😀]+", at(w)},
+     {regexp, "\"[^\"]*\"", at(s)}, {regexp, "[ \n\r\\x{2028}]", lex:whitespace()}].
+
+%% Random text: mostly characters the rules know, some they do not ('?'),
+%% and for the Unicode encodings, some broken bytes.
+random_input(Enc) ->
+    Chars = "aaab cde\"\n\r?" ++ [16#3BB, 16#1F600, 16#2028],
+    N = rand:uniform(30) - 1,
+    Text = [ lists:nth(rand:uniform(length(Chars)), Chars) || _ <- lists:seq(1, N) ],
+    Bin = case Enc of
+              _ when Enc == bytes; Enc == latin1 -> list_to_binary([ C || C <- Text, C < 256 ]);
+              _ -> unicode:characters_to_binary(Text, unicode, Enc)
+          end,
+    case Enc =/= bytes andalso rand:uniform(4) == 1 of
+        true ->
+            Cut = rand:uniform(byte_size(Bin) + 1) - 1,
+            <<Pre:Cut/binary, Post/binary>> = Bin,
+            Junk = lists:nth(rand:uniform(3), [<<16#FF>>, <<16#C3>>, <<16#D8, 16#00>>]),
+            case rand:uniform(2) of
+                1 -> <<Pre/binary, Junk/binary, Post/binary>>;
+                2 -> Pre
+            end;
+        false ->
+            Bin
+    end.
+
+driver_equivalence_test_() ->
+    {timeout, 120,
+     fun() ->
+             rand:seed(exsss, {17, 42, 4711}),
+             [ begin
+                   Rules = driver_rules(Enc),
+                   Opts = [{encoding, Enc}],
+                   Bin = random_input(Enc),
+                   FromBin = caught(fun() -> lex:with(Rules, Bin, Opts) end),
+                   FromList = caught(fun() -> lex:with(Rules, binary_to_list(Bin), Opts) end),
+                   ?assertEqual({Enc, Bin, FromList}, {Enc, Bin, FromBin})
+               end || Enc <- [bytes, latin1 | ?ENCODINGS], _ <- lists:seq(1, 500) ]
+     end}.
+
+%% one/2 on a binary: the rest is a sub-binary, and lexing can continue
+one_binary_test() ->
+    Lex = lex:regexps_to_table(driver_rules(utf8), [{encoding, utf8}]),
+    lex:no_lines(),
+    In = <<"aaa ab \"λ\n\" c"/utf8>>,
+    Toks = (fun Loop(B, Acc) ->
+                    case lex:one(Lex, B) of
+                        {token, T, R} when is_binary(R) -> Loop(R, [T | Acc]);
+                        end_of_stream -> lists:reverse(Acc)
+                    end
+            end)(In, []),
+    ?assertEqual([{a, {1, 1}, "a"}, {a, {1, 2}, "a"}, {a, {1, 3}, "a"},
+                  {ab, {1, 5}, "ab"}, {s, {1, 8}, "\"λ\n\""}, {w, {2, 3}, "c"}],
+                 Toks),
+    ?assertEqual(end_of_stream, lex:one(Lex, <<>>)),
+    ?assertEqual(end_of_stream, lex:one(Lex, <<"  \n ">>)).
+
+%% with/3 on a binary raises the process's GC limits while it runs and
+%% restores them afterwards, also when lexing fails
+gc_limits_restored_test() ->
+    Self = self(),
+    spawn(fun() ->
+                  Flags = fun() -> process_info(self(), [min_heap_size, min_bin_vheap_size]) end,
+                  Before = Flags(),
+                  Big = binary:copy(<<"ab ">>, 200000),
+                  Ok = length(lex:with(driver_rules(utf8), Big, [{encoding, utf8}])),
+                  AfterOk = Flags(),
+                  Err = caught(fun() -> lex:with(driver_rules(utf8), <<Big/binary, "?">>, [{encoding, utf8}]) end),
+                  AfterErr = Flags(),
+                  Self ! {result, Before, Ok, AfterOk, Err, AfterErr}
+          end),
+    receive
+        {result, Before, Ok, AfterOk, Err, AfterErr} ->
+            ?assertEqual(200000, Ok),          % "ab" is one token (a*b)
+            ?assertEqual(Before, AfterOk),
+            ?assertEqual({'EXIT', {lex_no_match, {line, 1}, {column, 600001}}}, Err),
+            ?assertEqual(Before, AfterErr)
+    after 30000 ->
+            error(timeout)
+    end.
