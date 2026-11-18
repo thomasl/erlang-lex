@@ -472,26 +472,15 @@ regexps_to_internal(Regexp_rules0, Ctx) ->
     [ regexp_to_internal(N, Rule, Ctx)
       || {N, Rule} <- lists:zip(lists:seq(1,length(Regexp_rules0)), Regexp_rules0) ].
 
-%% Convert a single regexp rule to internal form. We permit two different
-%% forms of regexps.
-%%
-%% UNFINISHED
-%% - clumsy to repeat code like this
-%% - 'regexp2' isn't very nice either
-%%   * should we warn about either format?
+%% Convert a single regexp rule to internal form. A rule is
+%% {regexp, Regexp, Action} or {regexp, Prio, Regexp, Action}.
 
 regexp_to_internal(N, {regexp, Regexp_str, Action}, Ctx) ->
     Prio = 0,
     {regexp, N, parse_regexp(Regexp_str, Ctx), Action, Prio};
-regexp_to_internal(N, {regexp, Prio, Regexp_str, Action}, Ctx) 
+regexp_to_internal(N, {regexp, Prio, Regexp_str, Action}, Ctx)
   when is_integer(Prio), Prio >= 0 ->
-    {regexp, N, parse_regexp(Regexp_str, Ctx), Action, Prio};
-regexp_to_internal(N, {regexp2, Regexp_str, Action}, _Ctx) ->
-    Prio = 0,
-    {regexp, N, parse_regexp2(Regexp_str), Action, Prio};
-regexp_to_internal(N, {regexp2, Prio, Regexp_str, Action}, _Ctx) 
-  when is_integer(Prio), Prio >= 0 ->
-    {regexp, N, parse_regexp2(Regexp_str), Action, Prio}.
+    {regexp, N, parse_regexp(Regexp_str, Ctx), Action, Prio}.
     
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -537,15 +526,6 @@ parse_regexp(Regexp, Ctx) ->
   	    internal_form(RE, Ctx);
   	{error, Err} ->
   	    exit({regexp_error, Err, Regexp})
-    end.
-
-parse_regexp2(Regexp) ->
-    case regexp_parse2:string(Regexp) of
-  	{ok, RE} ->
-	    exit({regexp2_format_parsed_but_not_yet_compiled, Regexp, RE});
-  	    %% internal_form(RE);
-  	Err ->
-  	    exit(Err)
     end.
 
 %% Convert to internal form. 

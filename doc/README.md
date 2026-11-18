@@ -765,8 +765,6 @@ Syntax and semantics of the classes:
   mean DEL/space.
 - **Backtracking** can make lexing quadratic for pathological rule sets,
   see [Lexing corner cases](#lexing-corner-cases).
-- The alternative regexp syntax (`{regexp2, ...}`, `regexp_parse2.erl`) is
-  parsed but not compiled.
 
 [RFC 3629]: https://www.rfc-editor.org/rfc/rfc3629
 [RFC 2781]: https://www.rfc-editor.org/rfc/rfc2781

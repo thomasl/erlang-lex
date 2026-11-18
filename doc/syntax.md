@@ -55,8 +55,6 @@ dropped, which is handy while developing a specification.
 `lex` provides ready-made actions, see
 [README.md, "Token helpers"](README.md#token-helpers).
 
-A legacy form `{regexp2, ...}` is parsed but not implemented.
-
 ## 2. Regular expressions
 
 | Syntax | Meaning |
