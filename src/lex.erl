@@ -203,6 +203,7 @@
 
 with(Regexp_rules, Str) ->
     LEX  = regexps_to_table(Regexp_rules),
+    no_lines(),
     lex_string(LEX, Str).
 
 %% (testing: convert file to string)
@@ -246,9 +247,11 @@ one(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions}, String) ->
 
 %% Longest match applied to string (list of chars)
 
+%% NB: one/2 does not reset the line count (that would restart the count
+%%  at every token); call no_lines() before lexing a new input.
+
 longest_string({lex, Start, AcceptLimit, Table, Actions}, String) 
   when is_list(String) -> 
-    no_lines(),
     longest_string(Start, Table, AcceptLimit, Actions, String);
 longest_string(_LEX, String) ->
     exit({string_expected, String}).
