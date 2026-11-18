@@ -3,7 +3,7 @@ UCD_URL = https://www.unicode.org/Public/$(UCD_VERSION)/ucd
 UCD_DIR ?= ucd-$(UCD_VERSION)
 UCD_FILES = extracted/DerivedGeneralCategory.txt Scripts.txt \
 	ScriptExtensions.txt Blocks.txt PropList.txt DerivedCoreProperties.txt \
-	PropertyAliases.txt PropertyValueAliases.txt
+	PropertyAliases.txt PropertyValueAliases.txt CaseFolding.txt
 
 all:
 	mkdir -p ./ebin/

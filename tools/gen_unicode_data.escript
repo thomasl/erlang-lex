@@ -11,6 +11,7 @@
 %%   Scripts.txt  ScriptExtensions.txt  Blocks.txt
 %%   PropList.txt  DerivedCoreProperties.txt
 %%   PropertyAliases.txt  PropertyValueAliases.txt
+%%   CaseFolding.txt
 %%
 %% The generated module contains code point range lists only; all name
 %% resolution logic lives in lex_unicode.erl. See `make unicode-data`.
@@ -44,7 +45,9 @@ main([Dir, Version, Out]) ->
     BlkAliases = [ {maps:get(loose(Long), BlkByLoose), Fs}
                    || ["blk" | Fs = [_Short, Long | _]] <- PVA,
                       maps:is_key(loose(Long), BlkByLoose) ],
+    Orbits = case_orbits(read_fields(Dir, "CaseFolding.txt")),
     Src = [header(Version),
+           orbits_fun(Orbits),
            ranges_fun(gc, GC),
            ranges_fun(sc, Sc),
            ranges_fun(scx, Scx),
@@ -55,8 +58,10 @@ main([Dir, Version, Out]) ->
            alias_fun(blk, BlkAliases, Blk),
            alias_fun(bin, BinAliases, Bin)],
     ok = file:write_file(Out, Src),
-    io:format("wrote ~s (Unicode ~s): ~p gc, ~p scripts, ~p blocks, ~p binary props~n",
-              [Out, Version, maps:size(GC), maps:size(Sc), maps:size(Blk), maps:size(Bin)]);
+    io:format("wrote ~s (Unicode ~s): ~p gc, ~p scripts, ~p blocks, ~p binary props,"
+              " ~p case orbits~n",
+              [Out, Version, maps:size(GC), maps:size(Sc), maps:size(Blk), maps:size(Bin),
+               length(Orbits)]);
 main(_) ->
     io:format("usage: gen_unicode_data.escript UCD_DIR VERSION OUT_FILE~n"),
     halt(1).
@@ -71,9 +76,12 @@ header(Version) ->
      "%% ranges(Kind, Canonical) -> [{From, To}] (sorted, disjoint, merged)\n"
      "%% canonical(Kind, LooseName) -> Canonical | undefined\n"
      "%%   Kind = gc | sc | scx | blk | bin\n"
-     "%%   LooseName is lower case with ' ', '_', '-' removed (UAX44-LM3)\n\n"
+     "%%   LooseName is lower case with ' ', '_', '-' removed (UAX44-LM3)\n"
+     "%% case_orbits() -> [[CodePoint]]\n"
+     "%%   code points with the same simple case folding (CaseFolding.txt\n"
+     "%%   status C and S), each sorted, only orbits of 2 or more\n\n"
      "-module(lex_unicode_data).\n"
-     "-export([version/0, ranges/2, canonical/2]).\n\n"
+     "-export([version/0, ranges/2, canonical/2, case_orbits/0]).\n\n"
      "version() -> \"", Version, "\".\n\n"].
 
 ranges_fun(Kind, Map) ->
@@ -83,6 +91,21 @@ ranges_fun(Kind, Map) ->
                bin -> "ranges(_, _) ->\n    undefined.\n\n";
                _ -> []
            end.
+
+orbits_fun(Orbits) ->
+    io_lib:format("case_orbits() ->~n    ~w.~n~n", [Orbits]).
+
+%% Simple case folding: every code point maps to its fold; an orbit is
+%% the fold together with everything that folds to it.
+case_orbits(Lines) ->
+    M = lists:foldl(
+          fun([Code, Status, Fold | _], Acc) when Status == "C"; Status == "S" ->
+                  F = hex(Fold),
+                  maps:update_with(F, fun(L) -> [hex(Code) | L] end, [F, hex(Code)], Acc);
+             (_, Acc) ->
+                  Acc
+          end, #{}, Lines),
+    lists:sort([ lists:usort(O) || O <- maps:values(M) ]).
 
 %% canonical(Kind, Loose) clauses. Kind sc also covers scx (same names).
 alias_fun(Kind, Aliases, Map) ->

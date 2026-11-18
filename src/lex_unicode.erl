@@ -15,7 +15,9 @@
 %%
 %% This module provides:
 %% - encodings:      normalize_encoding/1, is_unicode/1
-%% - named classes:  property/1 (Perl-style \p{...} names)
+%% - named classes:  property/1 (Perl-style \p{...} names),
+%%                   posix_class/2 ([:alpha:] etc.)
+%% - case folding:   case_closure/1, ascii_case_closure/1
 %% - code point sets: normalize/1, union/2, complement/1, intersect/2,
 %%                   subtract/2, scalar_values/0
 %% - lowering:       byte_seqs/2, to_regexp/2
@@ -30,6 +32,9 @@
 -export([normalize_encoding/1,
          is_unicode/1,
          property/1,
+         posix_class/2,
+         case_closure/1,
+         ascii_case_closure/1,
          normalize/1,
          union/2,
          complement/1,
@@ -179,27 +184,54 @@ special("unicode") -> {ok, [{0, ?MAX_CP}]};
 special("assigned") -> {ok, complement(gc("Cn"))};
 special("ascii") -> {ok, [{0, 127}]};
 special("l&") -> {ok, gc("LC")};
-special("word") ->
+special("horizspace") -> special("blank");
+special("xposix" ++ Name) -> xposix(Name);
+special("posix" ++ Name) -> ascii_only(xposix(Name));
+special(Name) when Name == "word"; Name == "alnum"; Name == "blank";
+                   Name == "xdigit"; Name == "graph"; Name == "print" ->
+    xposix(Name);
+special(_) -> undefined.
+
+%% Perl's XPosix classes (perlrecharclass): the Unicode versions of the
+%% POSIX classes. Restricted to ASCII they are exactly the POSIX "C"
+%% locale classes, which is what [:name:] means in bytes mode.
+xposix("alpha") -> {ok, bin("Alphabetic")};
+xposix("digit") -> {ok, gc("Nd")};
+xposix("alnum") -> {ok, union(bin("Alphabetic"), gc("Nd"))};
+xposix("upper") -> {ok, bin("Uppercase")};
+xposix("lower") -> {ok, bin("Lowercase")};
+xposix("space") -> {ok, bin("White_Space")};
+xposix("blank") -> {ok, union([{9, 9}], gc("Zs"))};
+xposix("cntrl") -> {ok, gc("Cc")};
+xposix("punct") -> {ok, union(gc("P"), intersect(gc("S"), [{0, 127}]))};
+xposix("graph") ->
+    {ok, complement(union_all([bin("White_Space"), gc("Cc"), gc("Cs"), gc("Cn")]))};
+xposix("print") ->
+    {ok, Graph} = xposix("graph"),
+    {ok, Blank} = xposix("blank"),
+    {ok, subtract(union(Graph, Blank), gc("Cc"))};
+xposix("xdigit") -> {ok, bin("Hex_Digit")};
+xposix("word") ->
     %% Perl \w: Alphabetic + Mark + Decimal_Number + Connector_Punctuation
     %%   + Join_Control
     {ok, union_all([bin("Alphabetic"), gc("M"), gc("Nd"), gc("Pc"),
                     bin("Join_Control")])};
-special("xposixword") -> special("word");
-special("alnum") -> {ok, union(bin("Alphabetic"), gc("Nd"))};
-special("xposixalnum") -> special("alnum");
-special("blank") -> {ok, union([{9, 9}], gc("Zs"))};
-special("xposixblank") -> special("blank");
-special("horizspace") -> special("blank");
-special("xdigit") -> {ok, bin("Hex_Digit")};
-special("xposixxdigit") -> special("xdigit");
-special("xposixdigit") -> {ok, gc("Nd")};
-special("xposixspace") -> {ok, bin("White_Space")};
-special("xposixalpha") -> {ok, bin("Alphabetic")};
-special("xposixupper") -> {ok, bin("Uppercase")};
-special("xposixlower") -> {ok, bin("Lowercase")};
-special("xposixpunct") -> {ok, gc("P")};
-special("xposixcntrl") -> {ok, gc("Cc")};
-special(_) -> undefined.
+xposix(_) -> undefined.
+
+ascii_only({ok, Set}) -> {ok, intersect(Set, [{0, 127}])};
+ascii_only(undefined) -> undefined.
+
+%% posix_class(Name, Charset) -> {ok, Set} | {error, Reason}
+%%   Name as in [:Name:]: alpha digit alnum upper lower space blank
+%%   cntrl punct graph print xdigit word (word is a Perl extension)
+%%   Charset = unicode | ascii
+posix_class(Name, unicode) ->
+    posix_result(xposix(Name), Name);
+posix_class(Name, ascii) ->
+    posix_result(ascii_only(xposix(Name)), Name).
+
+posix_result({ok, _} = Ok, _Name) -> Ok;
+posix_result(undefined, Name) -> {error, {unknown_posix_class, Name}}.
 
 gc(Name) -> lex_unicode_data:ranges(gc, Name).
 bin(Name) -> lex_unicode_data:ranges(bin, Name).
@@ -257,6 +289,50 @@ intersect(_, _) ->
 
 subtract(A, B) ->
     intersect(normalize(A), complement(B)).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Case-insensitive matching
+%%
+%% case_closure(Set) adds every code point that has the same simple case
+%% folding (CaseFolding.txt, status C and S) as some member of Set; e.g.
+%% k -> k K U+212A (KELVIN SIGN), sigma -> sigma, final sigma, SIGMA.
+%% Full (multi-character) foldings such as sharp s -> "ss" are not used:
+%% a set of single characters can only match single characters.
+%%
+%% ascii_case_closure(Set) only pairs A-Z with a-z (bytes mode, where
+%% the bytes above 127 may be parts of UTF-8 characters).
+
+case_closure(Set0) ->
+    Set = normalize(Set0),
+    Extra = orbits_meeting(Set, case_index(), []),
+    normalize(Set ++ [ {C, C} || O <- Extra, C <- O ]).
+
+%% Walk the sorted [{CodePoint, Orbit}] index alongside the sorted set.
+orbits_meeting([{F, T} | Rs] = Set, [{C, O} | Is] = Index, Acc) ->
+    if
+        C < F -> orbits_meeting(Set, Is, Acc);
+        C > T -> orbits_meeting(Rs, Index, Acc);
+        true -> orbits_meeting(Set, Is, [O | Acc])
+    end;
+orbits_meeting(_, _, Acc) ->
+    Acc.
+
+case_index() ->
+    case persistent_term:get({?MODULE, case_index}, undefined) of
+        undefined ->
+            Index = lists:sort([ {C, O} || O <- lex_unicode_data:case_orbits(), C <- O ]),
+            persistent_term:put({?MODULE, case_index}, Index),
+            Index;
+        Index ->
+            Index
+    end.
+
+ascii_case_closure(Set0) ->
+    Set = normalize(Set0),
+    Upper = intersect(Set, [{$A, $Z}]),
+    Lower = intersect(Set, [{$a, $z}]),
+    normalize(Set ++ [ {F + 32, T + 32} || {F, T} <- Upper ]
+                  ++ [ {F - 32, T - 32} || {F, T} <- Lower ]).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Lowering code point sets to byte sequences

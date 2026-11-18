@@ -21,7 +21,8 @@ TODO:
 - support for incremental lexing 
   (basically return 'current state' and allow resume later)
 - Unicode: done for UTF-8, UTF-16 and UTF-32, see doc/README.md
-  * possible: POSIX [:alpha:] classes, case-insensitive matching
+  * also done: POSIX [:alpha:] classes, case-insensitive matching
+  * possible: multi-character case folding (ß ~ ss), normalization
 - code generation
   * emit a table as a constant data structure, and the lex driver with it,
     and a suitable API

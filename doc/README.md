@@ -57,7 +57,8 @@ This is approximately as complex as a programming language lexer gets.
   regexps_to_table([{regexp, [Prio,] Regexp_string, Action [,Prio]}]) -> 
                    Lex_table
   regexps_to_table(Rules, Options) -> Lex_table
-    %% Options: [{encoding, Enc}], see UNICODE below
+    %% Options: {encoding, Enc} (see UNICODE below) and
+    %%          case_insensitive (see CASE-INSENSITIVE MATCHING below)
     %% where Action(AccToken) -> {token, Token} | no_token
     %%      Regexp_string is a regexp according to the regexp module
     %%      Prio is an integer rule priority (default: 0)
@@ -142,6 +143,45 @@ It is up to you to return tokens suitable for yecc, but as you can see
 it's not too hard. Line numbers can be added using the library above.
 See also the example lexer specifications in `src/lex.erl`.
 
+## CASE-INSENSITIVE MATCHING
+
+In every encoding:
+
+- `(?i)` at the very start of a regexp makes all of it case-insensitive
+- `(?i:r)` makes `r` case-insensitive, `(?-i:r)` case-sensitive
+- the option `case_insensitive` (or `{case_insensitive, true}`) makes
+  every rule case-insensitive unless it says `(?-i)` / `(?-i:...)`
+
+````erlang
+  lex:with([{regexp, "(?i)select", lex:token(select)}, ...], Input)
+  lex:with(Rules, Input, [{encoding, utf8}, case_insensitive])
+````
+
+`(?i)` anywhere else is an error (use `(?i:...)`), and `i` is the only
+flag.
+
+In the Unicode encodings (and `latin1`), every character and class is
+closed under Unicode simple case folding: `(?i)k` also matches `K` and
+U+212A KELVIN SIGN, `(?i)σ` matches `σ`, `ς` and `Σ`, and `(?i)\p{Lu}`
+matches lower case letters too. Negation comes after folding, so
+`(?i)[^a]`, `(?i)\P{Lu}` and `(?i)[[:^upper:]]` match neither case (as in
+Perl). Multi-character foldings are not used: `(?i)ss` does not match
+`ß`. In `bytes` mode only ASCII letters are folded, since other bytes
+may be parts of UTF-8 characters.
+
+## POSIX CLASSES
+
+Inside `[...]`, `[:name:]` is a POSIX class and `[:^name:]` its
+complement, e.g. `[[:alpha:]_][[:alnum:]_]*`. The names are `alpha`,
+`digit`, `alnum`, `upper`, `lower`, `space`, `blank`, `cntrl`, `punct`,
+`graph`, `print`, `xdigit` and `word` (`[A-Za-z0-9_]`, a Perl extension).
+
+In `bytes` mode they are the ASCII ("C" locale) classes. In the other
+encodings they are Perl's Unicode versions (`\p{XPosixAlpha}` etc.):
+`[:alpha:]` is `\p{Alphabetic}`, `[:digit:]` is `\p{Nd}`, `[:space:]` is
+`\p{White_Space}`, and so on; their ASCII parts are the same as the
+"C" locale classes. `\p{PosixAlpha}` etc. are the ASCII-only versions.
+
 ## UNICODE
 
 By default (`{encoding, bytes}`) the lexer works as it always has: the
@@ -179,7 +219,8 @@ In all encodings except `bytes`, a regexp is a string of code points
     `\p{ID_Start}`, `\p{XID_Continue}`, `\p{Hex_Digit}`, ...,
     and `\p{Alpha=No}` etc.
   - `\p{Any}`, `\p{Assigned}`, `\p{ASCII}`, `\p{Word}`, `\p{Alnum}`,
-    `\p{Blank}`, `\p{XDigit}`
+    `\p{Blank}`, `\p{XDigit}`, `\p{Graph}`, `\p{Print}`,
+    `\p{XPosixAlpha}`, `\p{PosixAlpha}` (ASCII only), ...
   - an optional `Is` prefix (`\p{IsL}`); names match loosely (case,
     spaces, `_` and `-` are ignored)
   - `\P{...}` and `\p{^...}` are the complement
@@ -190,8 +231,8 @@ In all encodings except `bytes`, a regexp is a string of code points
 `.` and `[^...]` match any code point except the listed ones (`.`
 excludes newline), never a single byte of a multibyte character.
 
-The character data is generated from the Unicode Character Database
-(currently version 17.0.0) into `src/lex_unicode_data.erl`; run
+The character and case folding data is generated from the Unicode
+Character Database (currently version 17.0.0) into `src/lex_unicode_data.erl`; run
 `make unicode-data UCD_VERSION=x.y.z` to regenerate it.
 
 ### How it works

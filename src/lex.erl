@@ -73,8 +73,10 @@
 %% - what if {disj, []}? (dito)
 %% - lexing UTF8 (as defined in RFC 3629), UTF-16, UTF-32: done, see
 %%   regexps_to_table/2 and lex_unicode.erl
-%%   * not done: case-insensitive matching, POSIX [:classes:],
-%%     normalization (NFC/NFD), grapheme clusters
+%%   * case-insensitive matching ((?i), option case_insensitive) and
+%%     POSIX [:classes:] are done, for all encodings
+%%   * not done: multi-character case folding, normalization (NFC/NFD),
+%%     grapheme clusters
 %%
 %% Compile-time flags:
 %% DEBUG - enable debug output
@@ -441,6 +443,10 @@ regexps_to_table(Regexp_rules0) ->
 %%     utf16be | utf16le | {utf16, big | little}  (utf16 = big endian)
 %%     utf32be | utf32le | {utf32, big | little}  (utf32 = big endian)
 %%
+%%   case_insensitive | {case_insensitive, Bool}  (default false)
+%%     all rules are case-insensitive, as if they started with (?i);
+%%     (?-i) and (?-i:...) still switch it off
+%%
 %% In every encoding except 'bytes', the regexp is read as a string of
 %% code points and may use named Unicode classes (\\p{...}, \\P{...};
 %% see lex_unicode:property/1) and \\x{HHHHHH}. Each character or class
@@ -450,16 +456,20 @@ regexps_to_table(Regexp_rules0) ->
 regexps_to_table(Regexp_rules0, Opts) ->
     Enc = lex_unicode:normalize_encoding(
 	    proplists:get_value(encoding, Opts, bytes)),
-    Regexp_rules = regexps_to_internal(Regexp_rules0, Enc),
+    Fold = proplists:get_bool(case_insensitive, Opts),
+    Regexp_rules = regexps_to_internal(Regexp_rules0, {Enc, Fold}),
     NFA = regexps_to_nfa(Regexp_rules),
     DFA = minimize_dfa(nfa_to_dfa(NFA)),
     Lex_table = dfa_to_table(DFA, Regexp_rules, Enc),
     Lex_table.
 
 %% Convert all regexp rules to internal form
+%%
+%% Ctx = {Enc, Fold}: the encoding, and whether matching is
+%% case-insensitive by default (option case_insensitive).
 
-regexps_to_internal(Regexp_rules0, Enc) ->
-    [ regexp_to_internal(N, Rule, Enc)
+regexps_to_internal(Regexp_rules0, Ctx) ->
+    [ regexp_to_internal(N, Rule, Ctx)
       || {N, Rule} <- lists:zip(lists:seq(1,length(Regexp_rules0)), Regexp_rules0) ].
 
 %% Convert a single regexp rule to internal form. We permit two different
@@ -470,16 +480,16 @@ regexps_to_internal(Regexp_rules0, Enc) ->
 %% - 'regexp2' isn't very nice either
 %%   * should we warn about either format?
 
-regexp_to_internal(N, {regexp, Regexp_str, Action}, Enc) ->
+regexp_to_internal(N, {regexp, Regexp_str, Action}, Ctx) ->
     Prio = 0,
-    {regexp, N, parse_regexp(Regexp_str, Enc), Action, Prio};
-regexp_to_internal(N, {regexp, Prio, Regexp_str, Action}, Enc) 
+    {regexp, N, parse_regexp(Regexp_str, Ctx), Action, Prio};
+regexp_to_internal(N, {regexp, Prio, Regexp_str, Action}, Ctx) 
   when is_integer(Prio), Prio >= 0 ->
-    {regexp, N, parse_regexp(Regexp_str, Enc), Action, Prio};
-regexp_to_internal(N, {regexp2, Regexp_str, Action}, _Enc) ->
+    {regexp, N, parse_regexp(Regexp_str, Ctx), Action, Prio};
+regexp_to_internal(N, {regexp2, Regexp_str, Action}, _Ctx) ->
     Prio = 0,
     {regexp, N, parse_regexp2(Regexp_str), Action, Prio};
-regexp_to_internal(N, {regexp2, Prio, Regexp_str, Action}, _Enc) 
+regexp_to_internal(N, {regexp2, Prio, Regexp_str, Action}, _Ctx) 
   when is_integer(Prio), Prio >= 0 ->
     {regexp, N, parse_regexp2(Regexp_str), Action, Prio}.
     
@@ -496,31 +506,35 @@ regexp_to_internal(N, {regexp2, Prio, Regexp_str, Action}, _Enc)
 %% $       end of string
 %% [abc]   characters abc
 %% [^abc]  complement
+%% [[:alpha:]]  POSIX class (also [:^alpha:]), inside [...]
 %% r*      zero or more r
 %% r+      one or more r
 %% r?      zero or one r
 %% r1r2    sequencing
+%% (?i)r   case-insensitive r (only at the start of the regexp)
+%% (?i:r)  case-insensitive r; (?-i:r) case-sensitive r
 %%
 %% {optional, RE}        r?
 %% {comp_class, Chars}   complementation of chars
 %% {pclosure, RE}        r+
+%% {caseless, Bool, RE}  (?i:r), (?-i:r)
 %% bos                   "beginning of string", ^
 %% eos                   "end of string", $
 
 parse_regexp(Regexp) ->
-    parse_regexp(Regexp, bytes).
+    parse_regexp(Regexp, {bytes, false}).
 
-parse_regexp(Regexp, bytes) ->
+parse_regexp(Regexp, {bytes, Fold}) ->
     case regexp_parse:string(Regexp) of
   	{ok, RE} ->
-  	    internal_form(RE);
+  	    internal_form(RE, {bytes, Fold});
   	Err ->
   	    exit(Err)
     end;
-parse_regexp(Regexp, Enc) ->
+parse_regexp(Regexp, Ctx) ->
     case regexp_parse:string(Regexp, unicode) of
   	{ok, RE} ->
-  	    unicode_form(Enc, RE);
+  	    internal_form(RE, Ctx);
   	{error, Err} ->
   	    exit({regexp_error, Err, Regexp})
     end.
@@ -536,83 +550,87 @@ parse_regexp2(Regexp) ->
 
 %% Convert to internal form. 
 %%
+%% Characters and classes are first sets of code points (in bytes mode:
+%% bytes), then lowered to byte-level regexps by lower_set/2. For the
+%% Unicode encodings, that gives the byte sequences encoding the set (see
+%% lex_unicode:to_regexp/2), so the NFA/DFA construction is the same for
+%% all encodings.
+%%
+%% Case-insensitive matching closes each set under case folding before
+%% any complement is taken: [^a], \P{Lu} and [:^upper:] exclude both
+%% cases (as in Perl). In bytes mode, only A-Z/a-z are folded.
+%%
 %% *** UNFINISHED ***
 %% - does not handle beginning/end of string
 %% - (why do we have two internal forms?)
 
-internal_form({kclosure, RE}) ->
-    {iter, internal_form(RE)};
-internal_form({'or', RE1, RE2}) ->
-    flatten_disj([internal_form(RE1), internal_form(RE2)]);
-internal_form({optional, RE}) ->
-    {disj, [{seq, ""}, internal_form(RE)]};
-internal_form({char_class, Char_ranges}) ->
-    {disj, [ internal_range(Range) || Range <- Char_ranges ]};
-internal_form({comp_class, Char_ranges}) ->
-    %% how do we handle this? depends on charset, right?
-    %% (or build a more complex range merger...)
-    flatten_disj(complement_char_ranges(?min_char, ?max_char, Char_ranges));
-internal_form({concat, RE1, RE2}) ->
-    flatten_seq([internal_form(RE1), internal_form(RE2)]);
-internal_form({From, To}) 
-  when is_integer(From), is_integer(To), From =< To ->
-    {range, From, To};
-internal_form(N) when is_integer(N) ->
-    {range, N, N};
-internal_form({pclosure, RE}) ->
-    RegExp = internal_form(RE),
-    {seq, [RegExp, {iter, RegExp}]};
-internal_form(Other) ->
-    exit({regexp_not_handled, Other}).
+internal_form(RE) ->
+    internal_form(RE, {bytes, false}).
 
-%% Unicode version of internal_form/1: characters and classes are first
-%% sets of code points, then lowered to byte-level regexps for Enc
-%% (see lex_unicode:to_regexp/2). The result uses the same syntax tree
-%% as internal_form/1, so the NFA/DFA construction is unchanged.
-
-unicode_form(Enc, {kclosure, RE}) ->
-    {iter, unicode_form(Enc, RE)};
-unicode_form(Enc, {'or', RE1, RE2}) ->
-    flatten_disj([unicode_form(Enc, RE1), unicode_form(Enc, RE2)]);
-unicode_form(Enc, {optional, RE}) ->
-    {disj, [{seq, ""}, unicode_form(Enc, RE)]};
-unicode_form(Enc, {concat, RE1, RE2}) ->
-    flatten_seq([unicode_form(Enc, RE1), unicode_form(Enc, RE2)]);
-unicode_form(Enc, {pclosure, RE}) ->
-    RegExp = unicode_form(Enc, RE),
+internal_form({kclosure, RE}, Ctx) ->
+    {iter, internal_form(RE, Ctx)};
+internal_form({'or', RE1, RE2}, Ctx) ->
+    flatten_disj([internal_form(RE1, Ctx), internal_form(RE2, Ctx)]);
+internal_form({optional, RE}, Ctx) ->
+    {disj, [{seq, ""}, internal_form(RE, Ctx)]};
+internal_form({concat, RE1, RE2}, Ctx) ->
+    flatten_seq([internal_form(RE1, Ctx), internal_form(RE2, Ctx)]);
+internal_form({pclosure, RE}, Ctx) ->
+    RegExp = internal_form(RE, Ctx),
     {seq, [RegExp, {iter, RegExp}]};
-unicode_form(Enc, {char_class, Elems}) ->
-    lex_unicode:to_regexp(Enc, class_set(Elems));
-unicode_form(Enc, {comp_class, Elems}) ->
-    lex_unicode:to_regexp(Enc, lex_unicode:complement(class_set(Elems)));
-unicode_form(Enc, {prop, _Neg, _Name} = Prop) ->
-    lex_unicode:to_regexp(Enc, class_set([Prop]));
-unicode_form(Enc, C) when is_integer(C) ->
-    case lex_unicode:byte_seqs(Enc, [{C, C}]) of
-	[] -> exit({unencodable_char, C, Enc});
-	_ -> lex_unicode:to_regexp(Enc, [{C, C}])
+internal_form({caseless, Fold, RE}, {Enc, _Fold}) ->
+    internal_form(RE, {Enc, Fold});
+internal_form({char_class, Elems}, {Enc, _} = Ctx) ->
+    lower_set(Enc, class_set(Elems, Ctx));
+internal_form({comp_class, Elems}, {Enc, _} = Ctx) ->
+    lower_set(Enc, lex_unicode:complement(class_set(Elems, Ctx)));
+internal_form({prop, _Neg, _Name} = Prop, {Enc, _} = Ctx) ->
+    lower_set(Enc, class_set([Prop], Ctx));
+internal_form(C, {Enc, _} = Ctx) when is_integer(C) ->
+    case Enc =/= bytes andalso lex_unicode:byte_seqs(Enc, [{C, C}]) == [] of
+	true -> exit({unencodable_char, C, Enc});
+	false -> lower_set(Enc, elem_set(C, Ctx))
     end;
-unicode_form(_Enc, Other) ->
+internal_form(Other, _Ctx) ->
     exit({regexp_not_handled, Other}).
 
-%% The code point set of a class: chars, {From, To} and {prop, Neg, Name}
+lower_set(bytes, Set) ->
+    case lex_unicode:intersect(Set, [{?min_char, ?max_char}]) of
+	[{From, To}] -> {range, From, To};
+	Ranges -> {disj, [ {range, From, To} || {From, To} <- Ranges ]}
+    end;
+lower_set(Enc, Set) ->
+    lex_unicode:to_regexp(Enc, Set).
 
-class_set(Elems) ->
-    lex_unicode:normalize(lists:append([ elem_set(E) || E <- Elems ])).
+%% The set of a class: chars, {From, To}, {prop, Neg, Name} and
+%% {posix, Neg, Name}. Every element set is closed under case folding
+%% (if Fold), so the union is too.
 
-elem_set(C) when is_integer(C) ->
-    [{C, C}];
-elem_set({From, To}) when is_integer(From), is_integer(To) ->
-    [{From, To}];
-elem_set({prop, Neg, Name}) ->
-    case lex_unicode:property(Name) of
-	{ok, Set} when Neg ->
-	    lex_unicode:complement(Set);
-	{ok, Set} ->
-	    Set;
-	{error, Reason} ->
-	    exit(Reason)
-    end.
+class_set(Elems, Ctx) ->
+    lex_unicode:normalize(lists:append([ elem_set(E, Ctx) || E <- Elems ])).
+
+elem_set(C, Ctx) when is_integer(C) ->
+    fold_set([{C, C}], Ctx);
+elem_set({From, To}, Ctx) when is_integer(From), is_integer(To) ->
+    fold_set([{From, To}], Ctx);
+elem_set({prop, Neg, Name}, Ctx) ->
+    negate(Neg, fold_set(named_set(lex_unicode:property(Name)), Ctx));
+elem_set({posix, Neg, Name}, {Enc, _} = Ctx) ->
+    Charset = case lex_unicode:is_unicode(Enc) of
+		  true -> unicode;
+		  false -> ascii
+	      end,
+    negate(Neg, fold_set(named_set(lex_unicode:posix_class(Name, Charset)), Ctx)).
+
+named_set({ok, Set}) -> Set;
+named_set({error, Reason}) -> exit(Reason).
+
+negate(true, Set) -> lex_unicode:complement(Set);
+negate(false, Set) -> Set.
+
+fold_set(Set, {_Enc, false}) -> Set;
+fold_set(Set, {bytes, true}) -> lex_unicode:ascii_case_closure(Set);
+fold_set(Set, {_Enc, true}) -> lex_unicode:case_closure(Set).
 
 internal_range({From, To}) 
   when is_integer(From), is_integer(To), From =< To ->

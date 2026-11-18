@@ -63,6 +63,14 @@
 %% - \d \s \w (and \D \S \W) are Perl's Unicode classes: \p{Nd},
 %%   \p{White_Space}, \p{Word} (in bytes mode they still mean DEL, SPACE
 %%   and 'w')
+%%
+%% In both modes:
+%% - (?i) at the very start makes the whole regexp case-insensitive,
+%%   (?-i) case-sensitive; (?i:R) and (?-i:R) set it for R only. They
+%%   parse as {caseless, Bool, RE}. (?i) elsewhere is an error.
+%% - [:name:] and [:^name:] inside [...] are POSIX classes, parsed as
+%%   {posix, Neg, Name}; e.g. "[[:alpha:]_]". (In bytes mode they are the
+%%   ASCII classes; for Unicode, Perl's XPosix classes.)
 
 string(S) -> string(S, bytes).
 
@@ -78,7 +86,7 @@ string(S0, Mode) ->
             bytes -> binary_to_list(unicode:characters_to_binary(S0));
             unicode -> unicode:characters_to_list(S0)
         end,
-    case catch reg(S, Mode) of
+    case catch reg_top(S, Mode) of
 	{R,[]} -> {ok,R};
 	{_R,[C|_]} -> {error,{illegal,[C]}};
 	{error,E} -> {error,E}
@@ -122,6 +130,24 @@ format_error({char_class,What}) ->
 %%  is a recursive descent implementation of the grammar.
 
 reg(S, M) -> reg1(S, M).
+
+%% leading (?i) / (?-i) applies to the whole regexp
+
+reg_top("(?" ++ S0 = S, M) ->
+    case flags(S0) of
+	{Caseless, [$)|S1]} ->
+	    {R,S2} = reg(S1, M),
+	    {{caseless,Caseless,R},S2};
+	_ ->
+	    reg(S, M)
+    end;
+reg_top(S, M) -> reg(S, M).
+
+%% Only the i flag is supported: "i" or "-i"
+
+flags([$i|S]) -> {true,S};
+flags([$-,$i|S]) -> {false,S};
+flags(S) -> throw({error,{illegal_flags,lists:sublist(S, 3)}}).
 
 %% reg1 -> reg2 reg1'
 %% reg1' -> "|" reg2
@@ -168,6 +194,18 @@ reg3p(S, L) -> {L,S}.
                 C >= $A andalso C =< $F orelse 
                 C >= $a andalso C =< $f).
 
+reg4("(?" ++ S0, M) ->
+    case flags(S0) of
+	{Caseless, [$:|S1]} ->
+	    case reg(S1, M) of
+		{R,[$)|S2]} -> {{caseless,Caseless,R},S2};
+		{_R,_S} -> throw({error,{unterminated,"(?"}})
+	    end;
+	{_Caseless, [$)|_]} ->
+	    throw({error,{misplaced_flags,"(?i) is only allowed at the start; use (?i:...)"}});
+	_ ->
+	    throw({error,{illegal_flags,lists:sublist(S0, 3)}})
+    end;
 reg4([$(|S0], M) ->
     case reg(S0, M) of
 	{R,[$)|S1]} -> {R,S1};
@@ -284,7 +322,15 @@ char(C, S, _M) -> {C,S}.
 %% a named class {prop, Neg, Name}. A named class cannot be a range
 %% endpoint; "[\\p{L}-x]" means \p{L}, '-' or 'x' (as in Perl).
 
-char_class([C1|S0], Cc, M) when C1 =/= $] ->
+char_class([$[,$:|S0]=S, Cc, M) ->
+    case posix(S0) of
+	{Posix, S1} -> char_class(S1, [Posix|Cc], M);
+	no -> char_class_elem(S, Cc, M)
+    end;
+char_class(S, Cc, M) ->
+    char_class_elem(S, Cc, M).
+
+char_class_elem([C1|S0], Cc, M) when C1 =/= $] ->
     case char(C1, S0, M) of
 	{Cf,[$-,C2|S1]} when C2 =/= $], is_integer(Cf) ->
 	    case char(C2, S1, M) of
@@ -293,5 +339,17 @@ char_class([C1|S0], Cc, M) when C1 =/= $] ->
 	    end;
 	{C,S1} -> char_class(S1, [C|Cc], M)
     end;
-char_class(S, Cc, _M) -> {Cc,S}.
+char_class_elem(S, Cc, _M) -> {Cc,S}.
+
+%% after "[:": optional ^, a lower case name, ":]"
+%% (anything else, and "[" is an ordinary character as before)
+
+posix([$^|S]) -> posix(S, true);
+posix(S) -> posix(S, false).
+
+posix(S0, Neg) ->
+    case lists:splitwith(fun(C) -> C >= $a andalso C =< $z end, S0) of
+	{Name, ":]" ++ S1} when Name =/= [] -> {{posix,Neg,Name},S1};
+	_ -> no
+    end.
 

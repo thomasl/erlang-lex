@@ -293,3 +293,102 @@ erlang_lex_utf16_test() ->
                  lex:with(lex_test:real_erlang_lex(),
                           unicode:characters_to_binary(Src, unicode, {utf16, little}),
                           [{encoding, utf16le}])).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Case-insensitive matching
+
+closure(Name) -> lex_unicode:case_closure(prop(Name)).
+
+caseless_class_test_() ->
+    {timeout, 120,
+     [ fun() -> check_class("(?i)\\p{Lu}", closure("Lu"), Enc) end
+       || Enc <- [latin1 | ?ENCODINGS] ] ++
+     [ fun() -> check_class("(?i)[^k\\x{3C3}]",
+                            lex_unicode:complement(
+                              lex_unicode:case_closure([{$k, $k}, {16#3C3, 16#3C3}])), Enc) end
+       || Enc <- ?ENCODINGS ]}.
+
+case_closure_test() ->
+    C = fun(Cp) -> lex_unicode:case_closure([{Cp, Cp}]) end,
+    ?assertEqual([{$K, $K}, {$k, $k}, {16#212A, 16#212A}], C($k)),
+    ?assertEqual([{16#3A3, 16#3A3}, {16#3C2, 16#3C3}], C(16#3C2)),   % Σ ς σ
+    ?assertEqual([{16#DF, 16#DF}, {16#1E9E, 16#1E9E}], C(16#DF)),    % ß ẞ
+    ?assertEqual([{$1, $1}], C($1)),
+    %% Turkic dotted/dotless i (status T) are not folded with i/I
+    ?assertEqual([{$I, $I}, {$i, $i}], C($i)),
+    %% every set it returns is closed
+    L = closure("L"),
+    ?assertEqual(L, lex_unicode:case_closure(L)),
+    ?assertEqual([{$A, $C}, {$a, $c}], lex_unicode:ascii_case_closure([{$a, $c}])).
+
+caseless_lex_test_() ->
+    W = fun(Re, In, Opts) ->
+                caught(fun() -> lex:with([{regexp, Re, lex:item(t)},
+                                          {regexp, " ", lex:whitespace()}], In, Opts) end)
+        end,
+    U = [{encoding, utf8}],
+    [?_assertEqual([{t, 1, "SELECT"}, {t, 1, "SeLeCt"}], W("(?i)select", <<"SELECT SeLeCt">>, [])),
+     ?_assertEqual([{t, 1, "SELECT"}], W("select", <<"SELECT">>, [case_insensitive])),
+     ?_assertEqual([{t, 1, "SELECT"}], W("select", <<"SELECT">>, [{case_insensitive, true}])),
+     ?_assertMatch({'EXIT', {lex_no_match, _, _, _}}, W("(?-i)select", <<"SELECT">>, [case_insensitive])),
+     ?_assertEqual([{t, 1, "Keep"}], W("(?i:k)eep", <<"Keep">>, [])),
+     ?_assertMatch({'EXIT', {lex_no_match, _, {accumulated, "K"}, _}}, W("(?i:k)eep", <<"KEEP">>, [])),
+     ?_assertEqual([{t, 1, "ΣσςΣ"}], W("(?i)σ+", <<"ΣσςΣ"/utf8>>, U)),
+     ?_assertEqual([{t, 1, "K"}, {t, 1, [16#212A]}], W("(?i)k", <<"K"/utf8, 16#212A/utf8>>, U)),
+     ?_assertEqual([{t, 1, "ÀÉ"}], W("(?i)[à-é]+", <<"ÀÉ"/utf8>>, U)),
+     ?_assertEqual([{t, 1, "a"}], W("(?i)\\p{Lu}", <<"a">>, U)),
+     %% negation after folding
+     ?_assertMatch({'EXIT', {lex_no_match, _, _, _}}, W("(?i)[^a]", <<"A">>, [])),
+     ?_assertMatch({'EXIT', {lex_no_match, _, _, _}}, W("(?i)\\P{Lu}", <<"a">>, U)),
+     %% no multi-character folds
+     ?_assertMatch({'EXIT', {lex_no_match, _, _, _}}, W("(?i)ss", <<"ß"/utf8>>, U)),
+     %% bytes mode only folds ASCII, and never splits a UTF-8 literal
+     ?_assertEqual([{t, 1, [$C, $A, $F, 16#C3, 16#A9]}], W("(?i)café", <<"CAFé"/utf8>>, [])),
+     ?_assertMatch({'EXIT', {lex_no_match, _, _, _}}, W("(?i)café", <<"CAFÉ"/utf8>>, []))].
+
+flag_syntax_test_() ->
+    E = fun(Re) -> caught(fun() -> table(Re, utf8) end) end,
+    [?_assertMatch({'EXIT', {regexp_error, {misplaced_flags, _}, _}}, E("a(?i)b")),
+     ?_assertMatch({'EXIT', {regexp_error, {illegal_flags, _}, _}}, E("(?x)a")),
+     ?_assertMatch({'EXIT', {regexp_error, {unterminated, "(?"}, _}}, E("(?i:a")),
+     ?_assertMatch({'EXIT', {error, {illegal_flags, _}}}, caught(fun() -> table("(?s:a)", bytes) end))].
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% POSIX classes
+
+posix_unicode_test_() ->
+    {timeout, 120,
+     [ fun() -> check_class("[[:alpha:]]", prop("Alphabetic"), utf8) end,
+       fun() -> check_class("[[:^digit:]]", lex_unicode:complement(prop("Nd")), {utf16, little}) end,
+       fun() -> check_class("[[:word:]-]", lex_unicode:union(prop("Word"), [{$-, $-}]), utf8) end,
+       fun() -> check_class("[[:punct:]]", prop("XPosixPunct"), {utf32, big}) end ]}.
+
+%% In bytes mode the POSIX classes are the ASCII ("C" locale) ones
+posix_ascii_test() ->
+    Expect = [{"alpha", "A-Za-z"}, {"digit", "0-9"}, {"alnum", "0-9A-Za-z"},
+              {"upper", "A-Z"}, {"lower", "a-z"}, {"space", "\t\n\v\f\r "},
+              {"blank", "\t "}, {"xdigit", "0-9A-Fa-f"}, {"word", "0-9A-Za-z_"},
+              {"cntrl", lists:seq(0, 31) ++ [127]},
+              {"punct", "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"},
+              {"graph", lists:seq(33, 126)}, {"print", lists:seq(32, 126)}],
+    [ begin
+          Set = lex_unicode:normalize([ {C, C} || C <- expand(Chars) ]),
+          Lex = table("[[:" ++ Name ++ ":]]", bytes),
+          Got = [ B || B <- lists:seq(0, 255), accepts(Lex, [B]) ],
+          ?assertEqual({Name, [ C || {F, T} <- Set, C <- lists:seq(F, T) ]}, {Name, Got})
+      end || {Name, Chars} <- Expect ],
+    ?assertEqual([{0, 127}], lex_unicode:union(prop("PosixPrint"), prop("PosixCntrl"))),
+    ?assertMatch({'EXIT', {unknown_posix_class, "bogus"}},
+                 caught(fun() -> table("[[:bogus:]]", bytes) end)),
+    %% not a POSIX class: '[' and friends are ordinary characters
+    Lex = table("[[:al]+", bytes),
+    ?assert(accepts(Lex, "[:la")).
+
+expand([A, $-, B | Rest]) -> lists:seq(A, B) ++ expand(Rest);
+expand([C | Rest]) -> [C | expand(Rest)];
+expand([]) -> [].
+
+caseless_posix_test() ->
+    Lex = lex:regexps_to_table([{regexp, "[[:upper:]]+", lex:item(t)}],
+                               [{encoding, utf8}, case_insensitive]),
+    ?assert(accepts(Lex, "aBc")).
