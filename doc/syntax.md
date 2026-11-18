@@ -47,8 +47,9 @@ general identifier rule can come first or get a higher priority:
 
 **Actions.** `Action(Acc)` is called with the matched text *reversed*:
 a list of bytes in the `bytes` encoding, otherwise a list of code points.
-It returns `{token, Token}` to emit `Token`, or `no_token` to drop the
-match (whitespace, comments). Use `lists:reverse(Acc)` for the text. If
+An action may also take two arguments, `Action(Acc, {Line, Column})`,
+the second being where the token starts. It returns `{token, Token}` to
+emit `Token`, or `no_token` to drop the match (whitespace, comments). Use `lists:reverse(Acc)` for the text. If
 `Action` is not a fun, the match is printed as `rule Action: Text` and
 dropped, which is handy while developing a specification.
 

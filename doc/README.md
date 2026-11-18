@@ -156,6 +156,9 @@ Compile the rules. `Options` is a list of:
 - `{newline, unicode | ascii | lf}`: which characters end a line, see
   [Line and column counting](#line-and-column-counting); default
   `unicode`, or `ascii` in the `bytes` encoding
+- `{position, process | argument}`: whether the drivers keep the line and
+  column in the process dictionary (default) or pass them as arguments,
+  see [Position as an argument](#position-as-an-argument)
 
 Errors in the rules exit here, see [Errors](#errors). The table is
 `{lex, Start, AcceptLimit, Table, Actions, Enc, NL}`; treat it as opaque.
@@ -479,6 +482,51 @@ The position is kept in the process dictionary, so with `with/2,3`,
 `one/2,3` it belongs to the process: two such lexers interleaved in one
 process share it. The non-blocking interface keeps a position per stream
 (see [Incremental input](#incremental-input)).
+
+#### Position as an argument
+
+With the option `{position, argument}`, the drivers do not keep the
+position in the process dictionary: they pass `{Line, Column}` to each
+action and get the new position back, as arguments and results.
+
+An action can take the position as a second argument,
+`fun(Acc, {Line, Column}) -> ...`. This works in both modes (in process
+mode the driver reads the position from the dictionary for it). A
+1-argument action, such as the token helpers, also works in argument
+mode: the driver puts the position in the dictionary for the call, so
+that `current_line()` and `inc_lines/1` work as usual.
+
+```erlang
+Rules = [{regexp, "[a-z]+", fun(Acc, {Line, Col}) ->
+                                    {token, {word, {Line, Col}, lists:reverse(Acc)}}
+                            end},
+         {regexp, "[ \n]+", fun(_Acc, _Pos) -> no_token end}],
+lex:with(Rules, <<"ab\n cd">>, [{position, argument}])
+%% => [{word,{1,1},"ab"},{word,{2,2},"cd"}]
+```
+
+(This is `lex_examples:position_argument/1`.)
+
+With only 2-argument actions, argument mode does not touch the process
+dictionary at all; `current_line()` etc. are then not updated. `one/2,3`
+continue from the dictionary's position and leave the new one there, as
+in process mode.
+
+It is not faster. Lexing about 1 MB in a new process (Apple M4, OTP 29,
+best of 9, three rounds):
+
+| Input | Process mode | Argument mode, 2-argument actions | Argument mode, 1-argument actions |
+|---|---|---|---|
+| `bytes`, binary | 36 ms | 36 ms | 41 ms |
+| `bytes`, flat list | 39 ms | 39 ms | 53 ms |
+| `utf8`, binary | 41 ms | 38 ms | 40 ms |
+| `utf8`, 4 KB chunks | 140 ms | 145 ms | 148 ms |
+
+A dictionary `put` and `get` per token cost about as much as returning
+the new position in a tuple. 1-argument actions in argument mode pay for
+both. The reason to use argument mode is that the position is then plain
+data rather than state of the process. (The non-blocking interface keeps
+a position per stream in either mode.)
 
 ### Other utilities
 

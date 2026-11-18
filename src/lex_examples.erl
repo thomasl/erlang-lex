@@ -15,7 +15,8 @@
          safe_lex/1,
          positions/1,
          iodata/1,
-         from_file/1]).
+         from_file/1,
+         position_argument/1]).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% 1. A calculator lexer in the default (bytes) encoding.
@@ -204,3 +205,17 @@ from_file(Name) ->
     try lex:with(ident_rules(), <<>>, More, [{encoding, utf8}])
     after file:close(Fd)
     end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% 12. The position as an argument of the actions, as in doc/README.md,
+%%     "Position as an argument".
+%%
+%%   lex_examples:position_argument(<<"ab\n cd">>)
+%%   => [{word,{1,1},"ab"},{word,{2,2},"cd"}]
+
+position_argument(Input) ->
+    Rules = [{regexp, "[a-z]+", fun(Acc, {Line, Col}) ->
+                                        {token, {word, {Line, Col}, lists:reverse(Acc)}}
+                                end},
+             {regexp, "[ \n]+", fun(_Acc, _Pos) -> no_token end}],
+    lex:with(Rules, Input, [{position, argument}]).

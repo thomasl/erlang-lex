@@ -6,7 +6,7 @@
 
 -import(lex_examples, [calc/1, config/1, idents/1, sql/1, utf16_file/1,
                        scripts/1, tokens_one_by_one/1, safe_lex/1, positions/1,
-                       iodata/1, from_file/1]).
+                       iodata/1, from_file/1, position_argument/1]).
 
 calc_test() ->
     ?assertEqual([{num, 1, "12"}, {'+', 1}, {'(', 1}, {num, 1, "3"}, {'*', 1},
@@ -71,3 +71,6 @@ temp_dir() ->
         false -> "/tmp";
         Dir -> Dir
     end.
+
+position_argument_test() ->
+    ?assertEqual([{word, {1, 1}, "ab"}, {word, {2, 2}, "cd"}], position_argument(<<"ab\n cd">>)).

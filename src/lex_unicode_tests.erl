@@ -12,7 +12,7 @@ table(Regexp, Enc) ->
     lex:regexps_to_table([{regexp, Regexp, lex:item(t)}], [{encoding, Enc}]).
 
 %% Run the DFA over Bytes; true if it ends in an accepting state.
-accepts({lex, Start, AccLim, Table, _Actions, _Enc, _NL}, Bytes) ->
+accepts({lex, Start, AccLim, Table, _Actions, _Enc, _NL, _PosMode}, Bytes) ->
     walk(Start, AccLim, Table, Bytes).
 
 walk(S, AccLim, _Table, []) ->
@@ -24,7 +24,7 @@ walk(S, AccLim, Table, [B | Bs]) ->
     end.
 
 %% Number of distinct byte strings accepted by an acyclic table.
-count_accepted({lex, Start, AccLim, Table, _Actions, _Enc, _NL}) ->
+count_accepted({lex, Start, AccLim, Table, _Actions, _Enc, _NL, _PosMode}) ->
     {N, _} = count(Start, AccLim, Table, #{}),
     N.
 
@@ -522,12 +522,20 @@ count_lines_test() ->
 
 %% Rules with backtracking ("a*b" vs "a"), multi-line tokens, and room
 %% for both no-match and encoding errors.
-driver_rules(bytes) ->
-    [{regexp, "a", at(a)}, {regexp, "a*b", at(ab)}, {regexp, "[c-e]+", at(w)},
-     {regexp, "\"[^\"]*\"", at(s)}, {regexp, "[ \n\r]", lex:whitespace()}];
-driver_rules(_Enc) ->
-    [{regexp, "a", at(a)}, {regexp, "a*b", at(ab)}, {regexp, "[c-eλ😀]+", at(w)},
-     {regexp, "\"[^\"]*\"", at(s)}, {regexp, "[ \n\r\\x{2028}]", lex:whitespace()}].
+driver_rules(Enc) ->
+    driver_rules(Enc, fun at/1).
+
+%% At(Tag) makes the action, with 1 or 2 arguments (at/1 or at2/1)
+driver_rules(bytes, At) ->
+    [{regexp, "a", At(a)}, {regexp, "a*b", At(ab)}, {regexp, "[c-e]+", At(w)},
+     {regexp, "\"[^\"]*\"", At(s)}, {regexp, "[ \n\r]", lex:whitespace()}];
+driver_rules(_Enc, At) ->
+    [{regexp, "a", At(a)}, {regexp, "a*b", At(ab)}, {regexp, "[c-eλ😀]+", At(w)},
+     {regexp, "\"[^\"]*\"", At(s)}, {regexp, "[ \n\r\\x{2028}]", lex:whitespace()}].
+
+%% the same as at/1, as a 2-argument action: the position is an argument
+at2(Tag) ->
+    fun(Acc, Pos) -> {token, {Tag, Pos, lists:reverse(Acc)}} end.
 
 %% Random text: mostly characters the rules know, some they do not ('?'),
 %% and for the Unicode encodings, some broken bytes.
@@ -1092,3 +1100,95 @@ socket_loop(Sock, C, Acc) ->
     after 5000 ->
             error(timeout)
     end.
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Position mode: {position, argument} passes the position to and from
+%% the actions instead of keeping it in the process dictionary
+
+%% Every driver, in argument mode, with 1- and 2-argument actions, gives
+%% the same tokens, positions and errors as process mode
+position_modes_test_() ->
+    {timeout, 120,
+     fun() ->
+             rand:seed(exsss, {5, 6, 7}),
+             [ begin
+                   Opts = [{encoding, Enc}],
+                   Arg = [{position, argument} | Opts],
+                   Bin = random_input(Enc),
+                   Ref = caught(fun() -> lex:with(driver_rules(Enc), Bin, Opts) end),
+                   IoList = random_iolist(Bin),
+                   Chunks = random_chunks(Bin),
+                   Ways = [{process_at2, fun() -> lex:with(driver_rules(Enc, fun at2/1), Bin, Opts) end}]
+                       ++ [ {{Name, How}, Fun}
+                            || {Name, Rules} <- [{at, driver_rules(Enc)}, {at2, driver_rules(Enc, fun at2/1)}],
+                               {How, Fun} <- [{binary, fun() -> lex:with(Rules, Bin, Arg) end},
+                                              {iolist, fun() -> lex:with(Rules, IoList, Arg) end},
+                                              {list, fun() -> lex:with(Rules, binary_to_list(Bin), Arg) end},
+                                              {more, fun() -> lex:with(Rules, <<>>, more_from(Chunks, ended), Arg) end},
+                                              {feed, fun() -> feed_all(lex:regexps_to_table(Rules, Arg), Chunks) end}] ],
+                   [ ?assertEqual({Way, Enc, Bin, Ref}, {Way, Enc, Bin, caught(Fun)}) || {Way, Fun} <- Ways ]
+               end || Enc <- [bytes, latin1 | ?ENCODINGS], _ <- lists:seq(1, 100) ]
+     end}.
+
+%% In argument mode with only 2-argument actions, the process dictionary
+%% is not used at all (a 1-argument action, such as lex:whitespace(),
+%% would have the position put there for it)
+argument_mode_no_dictionary_test() ->
+    Self = self(),
+    Rules = [ case R of
+                  {regexp, Re, A} when is_function(A, 1) -> {regexp, Re, fun(_Acc, _Pos) -> no_token end};
+                  _ -> R
+              end || R <- driver_rules(utf8, fun at2/1) ],
+    Opts = [{encoding, utf8}, {position, argument}],
+    In = <<"ab cd\n\"λ\n\" e"/utf8>>,
+    spawn(fun() ->
+                  Self ! try
+                             R1 = lex:with(Rules, In, Opts),
+                             R2 = lex:with(Rules, binary_to_list(In), Opts),
+                             R3 = lex:with(Rules, <<"ab">>,
+                                           more_from([<<" cd\n\"λ"/utf8>>, <<"\n\" e">>], ended), Opts),
+                             {done, R4} = lex:tokens(lex:feed(lex:feed(lex:start(lex:regexps_to_table(Rules, Opts)),
+                                                                       In), eof)),
+                             {result, [R1, R2, R3, R4], get()}
+                         catch C:E:St -> {crashed, C, E, St}
+                         end
+          end),
+    receive
+        {result, Results, Dict} ->
+            Expect = [{ab, {1, 1}, "ab"}, {w, {1, 4}, "cd"}, {s, {2, 1}, "\"λ\n\""}, {w, {3, 3}, "e"}],
+            ?assertEqual([Expect, Expect, Expect, Expect], Results),
+            ?assertEqual([], [ KV || KV = {lex_position, _} <- Dict ]);
+        Crashed ->
+            error(Crashed)
+    after 4000 ->
+            error(timeout)
+    end.
+
+position_mode_details_test_() ->
+    Arg = [{position, argument}],
+    [%% inc_lines/1 in a 1-argument action still works in argument mode
+     ?_assertEqual([{w, {1, 1}, "c"}, {w, {11, 9}, "d"}],
+                   lex:with([{regexp, "#skip", fun(_) -> lex:inc_lines(10), no_token end},
+                             {regexp, "[c-e]+", at2(w)}, {regexp, " ", lex:whitespace()}],
+                            <<"c #skip d">>, Arg)),
+     %% a 2-argument action in process mode
+     ?_assertEqual([{w, {1, 1}, "c"}, {w, {2, 1}, "d"}],
+                   lex:with([{regexp, "[c-e]+", at2(w)}, {regexp, "\n", lex:newline()}],
+                            <<"c\nd">>, [])),
+     %% one/2 in argument mode continues from the process dictionary
+     ?_test(begin
+                Lex = lex:regexps_to_table(driver_rules(bytes, fun at2/1), Arg),
+                lex:no_lines(),
+                {token, {w, {1, 1}, "cd"}, R1} = lex:one(Lex, <<"cd\n e">>),
+                {token, {w, {2, 2}, "e"}, <<>>} = lex:one(Lex, R1),
+                ?assertEqual({2, 3}, lex:current_position()),
+                lex:no_lines(),
+                {token, {w, {1, 1}, "cd"}, R2, M2} = lex:one(Lex, <<"cd\n">>, fun() -> {last, <<" e">>} end),
+                {token, {w, {2, 2}, "e"}, _, _} = lex:one(Lex, R2, M2)
+            end),
+     %% errors report the position in argument mode too
+     ?_assertEqual({'EXIT', {lex_no_match, {line, 2}, {column, 2}}},
+                   caught(fun() -> lex:with(driver_rules(bytes, fun at2/1), <<"cd\n ?">>, Arg) end)),
+     ?_assertEqual({'EXIT', {unknown_position_mode, register}},
+                   caught(fun() -> lex:regexps_to_table(driver_rules(bytes), [{position, register}]) end))].

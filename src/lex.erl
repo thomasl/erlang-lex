@@ -111,7 +111,8 @@
 	 minimize_dfa/1,
 	 dfa_to_table/2,
 	 dfa_to_table/3,
-	 dfa_to_table/4
+	 dfa_to_table/4,
+	 dfa_to_table/5
 	]).
 
 %% library functions for using the generated lexer
@@ -235,7 +236,7 @@ with(Regexp_rules, Bin, Opts) when is_binary(Bin) ->
       [vheap, heap], byte_size(Bin),
       fun() ->
 	      LEX = regexps_to_table(Regexp_rules, Opts),
-	      no_lines(),
+	      reset_pos(LEX),
 	      lex_binary(LEX, Bin)
       end);
 with(Regexp_rules, IoList, Opts) when is_list(IoList) ->
@@ -244,7 +245,7 @@ with(Regexp_rules, IoList, Opts) when is_list(IoList) ->
       [vheap], io_size(IoList),
       fun() ->
 	      LEX = regexps_to_table(Regexp_rules, Opts),
-	      no_lines(),
+	      reset_pos(LEX),
 	      lex_iolist(LEX, IoList)
       end).
 
@@ -310,7 +311,7 @@ one(LEX, IoList) when is_list(IoList) ->
 %% with/2,3 now use the iolist driver for lists, which gives the same
 %% results (the tests check this against one_list/2 and lex_string/2).
 
-one_list(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, String) ->
+one_list(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, _PosMode}, String) ->
     try longest_string(LEX, String)
     catch
 	throw:{?MODULE, no_match, RevAcc, Remainder} ->
@@ -322,7 +323,7 @@ one_list(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, String) -
 %% NB: one/2 does not reset the line count (that would restart the count
 %%  at every token); call no_lines() before lexing a new input.
 
-longest_string({lex, Start, AcceptLimit, Table, Actions, _Enc, _NL}, String) 
+longest_string({lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}, String) 
   when is_list(String) -> 
     longest_string(Start, Table, AcceptLimit, Actions, String);
 longest_string(_LEX, String) ->
@@ -493,11 +494,23 @@ post_accept("", _Acc, AccSt, _State, _Nxt, Table,
 %% converting it afterwards was measured to be slower, in particular for
 %% UTF-16 and UTF-32.)
 
-one_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, Bin) ->
+one_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, process}, Bin) ->
     try bin_longest(LEX, Bin)
     catch
-	throw:{?MODULE, bin_no_match, Bin1, Len} ->
-	    bin_report_no_match(Enc, NL, Bin1, Len)
+	throw:{?MODULE, bin_no_match, Bin1, Len, Pos} ->
+	    bin_report_no_match(Enc, NL, Pos, Bin1, Len)
+    end;
+one_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, argument}, Bin) ->
+    try bin_longest_a(LEX, Bin, entry_pos(argument)) of
+	{token, T, Rest, Pos1} ->
+	    exit_pos(Pos1),
+	    {token, T, Rest};
+	{end_of_stream, Pos1} ->
+	    exit_pos(Pos1),
+	    end_of_stream
+    catch
+	throw:{?MODULE, bin_no_match, Bin1, Len, Pos} ->
+	    bin_report_no_match(Enc, NL, Pos, Bin1, Len)
     end.
 
 %% Garbage collection. Lexing a whole binary builds a list of tokens
@@ -536,12 +549,23 @@ with_gc_limits(Which, Size, Fun) ->
 	[ process_flag(Flag, Old) || {Flag, Old} <- Restore ]
     end.
 
-lex_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, Bin) ->
-    try lex_binary(LEX, Bin, [])
+lex_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, PosMode}, Bin) ->
+    try
+	case PosMode of
+	    process -> lex_binary(LEX, Bin, []);
+	    argument -> lex_binary_a(LEX, Bin, {1, 1, false}, [])
+	end
     catch
-	throw:{?MODULE, bin_no_match, Bin1, Len} ->
-	    bin_report_no_match(Enc, NL, Bin1, Len)
+	throw:{?MODULE, bin_no_match, Bin1, Len, Pos} ->
+	    bin_report_no_match(Enc, NL, Pos, Bin1, Len)
     end.
+
+%% with/2,3,4 start at line 1: in process mode, reset the process
+%% dictionary; in argument mode the position starts in the driver, and
+%% the dictionary is not used at all.
+
+reset_pos({lex, _, _, _, _, _, _, process}) -> no_lines();
+reset_pos({lex, _, _, _, _, _, _, argument}) -> ok.
 
 %% Raise each process flag to at least Value (capped); returns the
 %% [{Flag, OldValue}] to restore.
@@ -560,11 +584,24 @@ lex_binary(LEX, Bin, Acc) ->
 	    lists:reverse(Acc)
     end.
 
+%% argument mode: the position is passed along
+
+lex_binary_a(LEX, Bin, Pos, Acc) ->
+    case bin_longest_a(LEX, Bin, Pos) of
+	{token, T, Rest, Pos1} ->
+	    lex_binary_a(LEX, Rest, Pos1, [T|Acc]);
+	{end_of_stream, _Pos} ->
+	    lists:reverse(Acc)
+    end.
+
 %% Find the next token, skipping no_token matches.
+
+%% Process mode: the actions keep the position in the process
+%% dictionary. Returns {token, T, Rest} or end_of_stream.
 
 bin_longest(_LEX, <<>>) ->
     end_of_stream;
-bin_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL}, Bin) ->
+bin_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}, Bin) ->
     case scan(Bin, Start, Table, AcceptLimit, 0, [], 0, 0, []) of
 	{accept, State, Len, RevAcc} ->
 	    <<_:Len/binary, Rest/binary>> = Bin,
@@ -575,7 +612,27 @@ bin_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL}, Bin) ->
 		    token(T, Rest)
 	    end;
 	{fail, Len} ->
-	    throw({?MODULE, bin_no_match, Bin, Len})
+	    throw({?MODULE, bin_no_match, Bin, Len, process})
+    end.
+
+%% Argument mode: Pos = {Line, Col, AfterCR} is passed to the actions,
+%% which return the new one. Returns {token, T, Rest, Pos} or
+%% {end_of_stream, Pos}.
+
+bin_longest_a(_LEX, <<>>, Pos) ->
+    {end_of_stream, Pos};
+bin_longest_a(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}, Bin, Pos) ->
+    case scan(Bin, Start, Table, AcceptLimit, 0, [], 0, 0, []) of
+	{accept, State, Len, RevAcc} ->
+	    <<_:Len/binary, Rest/binary>> = Bin,
+	    case (element(State, Actions))(RevAcc, Pos) of
+		{no_token, Pos1} ->
+		    bin_longest_a(LEX, Rest, Pos1);
+		{{token, T}, Pos1} ->
+		    {token, T, Rest, Pos1}
+	    end;
+	{fail, Len} ->
+	    throw({?MODULE, bin_no_match, Bin, Len, Pos})
     end.
 
 %% scan(Bin, State, Table, AcceptLimit, N, RevAcc,
@@ -609,10 +666,10 @@ scan_done(_N, LastState, LastLen, LastRevAcc) ->
 %% bytes of the failed token and a few more: a malformed character that
 %% starts at or before the failing byte is at most 4 bytes long.
 
-bin_report_no_match(Enc, NL, Bin, Len) ->
+bin_report_no_match(Enc, NL, Pos, Bin, Len) ->
     <<Acc:Len/binary, Rest/binary>> = Bin,
     More = binary:part(Rest, 0, min(byte_size(Rest), 8)),
-    report_no_match(Enc, NL, lists:reverse(binary_to_list(Acc)),
+    report_no_match(Enc, NL, report_pos(Pos), lists:reverse(binary_to_list(Acc)),
 		    binary_to_list(More)).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -644,22 +701,38 @@ bin_report_no_match(Enc, NL, Bin, Len) ->
 %% of a token; it is reported like a non-byte in a list (not_a_byte in
 %% the Unicode encodings, lex_no_match in bytes mode).
 
-one_iolist(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, IoData) ->
+one_iolist(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, process}, IoData) ->
     try io_longest(LEX, IoData, []) of
 	{token, T, {Cur, Stack}} ->
 	    {token, T, io_join(Cur, Stack)};
 	end_of_stream ->
 	    end_of_stream
     catch
-	throw:{?MODULE, io_no_match, Cur, Stack, Len} ->
-	    io_report_no_match(Enc, NL, Cur, Stack, Len)
+	throw:{?MODULE, io_no_match, Cur, Stack, Len, Pos} ->
+	    io_report_no_match(Enc, NL, Pos, Cur, Stack, Len)
+    end;
+one_iolist(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, argument}, IoData) ->
+    try io_longest_a(LEX, IoData, [], entry_pos(argument)) of
+	{token, T, {Cur, Stack}, Pos1} ->
+	    exit_pos(Pos1),
+	    {token, T, io_join(Cur, Stack)};
+	{end_of_stream, Pos1} ->
+	    exit_pos(Pos1),
+	    end_of_stream
+    catch
+	throw:{?MODULE, io_no_match, Cur, Stack, Len, Pos} ->
+	    io_report_no_match(Enc, NL, Pos, Cur, Stack, Len)
     end.
 
-lex_iolist(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, IoData) ->
-    try lex_iolist(LEX, IoData, [], [])
+lex_iolist(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, PosMode}, IoData) ->
+    try
+	case PosMode of
+	    process -> lex_iolist(LEX, IoData, [], []);
+	    argument -> lex_iolist_a(LEX, IoData, [], {1, 1, false}, [])
+	end
     catch
-	throw:{?MODULE, io_no_match, Cur, Stack, Len} ->
-	    io_report_no_match(Enc, NL, Cur, Stack, Len)
+	throw:{?MODULE, io_no_match, Cur, Stack, Len, Pos} ->
+	    io_report_no_match(Enc, NL, Pos, Cur, Stack, Len)
     end.
 
 lex_iolist(LEX, Cur, Stack, Acc) ->
@@ -670,9 +743,19 @@ lex_iolist(LEX, Cur, Stack, Acc) ->
 	    lists:reverse(Acc)
     end.
 
+lex_iolist_a(LEX, Cur, Stack, Pos, Acc) ->
+    case io_longest_a(LEX, Cur, Stack, Pos) of
+	{token, T, {Cur1, Stack1}, Pos1} ->
+	    lex_iolist_a(LEX, Cur1, Stack1, Pos1, [T|Acc]);
+	{end_of_stream, _Pos} ->
+	    lists:reverse(Acc)
+    end.
+
 %% Find the next token, skipping no_token matches.
 
-io_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL}, Cur, Stack) ->
+%% process mode
+
+io_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}, Cur, Stack) ->
     case io_eof(io_scan(Cur, Stack, Start, Table, AcceptLimit, 0, [], 0, 0, [])) of
 	{accept, State, Len, RevAcc} ->
 	    {Cur1, Stack1} = io_skip(Cur, Stack, Len),
@@ -685,7 +768,25 @@ io_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL}, Cur, Stac
 	{fail, 0, at_end} ->
 	    end_of_stream;
 	{fail, Len, _} ->
-	    throw({?MODULE, io_no_match, Cur, Stack, Len})
+	    throw({?MODULE, io_no_match, Cur, Stack, Len, process})
+    end.
+
+%% argument mode
+
+io_longest_a(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}, Cur, Stack, Pos) ->
+    case io_eof(io_scan(Cur, Stack, Start, Table, AcceptLimit, 0, [], 0, 0, [])) of
+	{accept, State, Len, RevAcc} ->
+	    {Cur1, Stack1} = io_skip(Cur, Stack, Len),
+	    case (element(State, Actions))(RevAcc, Pos) of
+		{no_token, Pos1} ->
+		    io_longest_a(LEX, Cur1, Stack1, Pos1);
+		{{token, T}, Pos1} ->
+		    {token, T, {Cur1, Stack1}, Pos1}
+	    end;
+	{fail, 0, at_end} ->
+	    {end_of_stream, Pos};
+	{fail, Len, _} ->
+	    throw({?MODULE, io_no_match, Cur, Stack, Len, Pos})
     end.
 
 %% io_scan(Cur, Stack, State, Table, AcceptLimit, N, RevAcc,
@@ -778,10 +879,10 @@ io_join(Cur, Stack) ->
 %% failed token and a few more (see bin_report_no_match/4). An element
 %% that is not a byte ends the list, so that it is reported as such.
 
-io_report_no_match(Enc, NL, Cur, Stack, Len) ->
+io_report_no_match(Enc, NL, Pos, Cur, Stack, Len) ->
     Elements = io_take(Cur, Stack, Len + 8, []),
     {Acc, Rest} = lists:split(min(Len, length(Elements)), Elements),
-    report_no_match(Enc, NL, lists:reverse(Acc), Rest).
+    report_no_match(Enc, NL, report_pos(Pos), lists:reverse(Acc), Rest).
 
 io_take(_Cur, _Stack, 0, Acc) ->
     lists:reverse(Acc);
@@ -872,7 +973,7 @@ io_take(Bad, _Stack, _K, Acc) ->
 	 pos = {1, 1, false}	% {Line, Column, AfterCR}
 	}).
 
-start(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, _Enc, _NL}) ->
+start(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, _Enc, _NL, _PosMode}) ->
     #lexc{lex = LEX}.
 
 feed(#lexc{ended = true}, _Data) ->
@@ -890,7 +991,8 @@ rest(#lexc{cur = Cur, stack = Stack, tail = Tail}) ->
 position(#lexc{pos = {Line, Col, _AfterCR}}) ->
     {Line, Col}.
 
-next(C = #lexc{pos = Pos}) ->
+next(C = #lexc{lex = {lex, _, _, _, _, _, _, process}, pos = Pos}) ->
+    %% process mode: the actions keep the position in the dictionary
     put(?pos_key, Pos),
     case next1(C) of
 	{token, T, C1} ->
@@ -899,7 +1001,10 @@ next(C = #lexc{pos = Pos}) ->
 	    {more, C1#lexc{pos = position()}};
 	end_of_stream ->
 	    end_of_stream
-    end.
+    end;
+next(C) ->
+    %% argument mode: the position is passed to and from the actions
+    next1(C).
 
 tokens(C) ->
     tokens(C, []).
@@ -915,20 +1020,20 @@ tokens(C, Acc) ->
 
 next1(C = #lexc{fail = Len}) when Len =/= none ->
     check_fail(C);
-next1(C = #lexc{lex = {lex, Start, AcceptLimit, Table, _, _, _},
+next1(C = #lexc{lex = {lex, Start, AcceptLimit, Table, _, _, _, _PosMode},
 		cur = Cur, stack = Stack, tail = Tail, scan = none}) ->
     %% a new token: scan from its start, through all the data
     Stack1 = Stack ++ lists:reverse(Tail),
     C1 = C#lexc{stack = Stack1, tail = []},
     scanned(C1, io_scan(Cur, Stack1, Start, Table, AcceptLimit, 0, [], 0, 0, []));
-next1(C = #lexc{lex = {lex, _Start, AcceptLimit, Table, _, _, _},
+next1(C = #lexc{lex = {lex, _Start, AcceptLimit, Table, _, _, _, _PosMode},
 		scan = {State, N, RevAcc, LastState, LastLen, LastRevAcc}, new = New}) ->
     %% resume the scan with the chunks fed since it stopped
     C1 = C#lexc{scan = none, new = []},
     scanned(C1, io_scan(lists:reverse(New), [], State, Table, AcceptLimit,
 			N, RevAcc, LastState, LastLen, LastRevAcc)).
 
-scanned(C = #lexc{lex = {lex, _Start, _AcceptLimit, Table, _, _, _}, ended = Ended},
+scanned(C = #lexc{lex = {lex, _Start, _AcceptLimit, Table, _, _, _, _PosMode}, ended = Ended},
 	{eof, State, N, RevAcc, LastState, LastLen, LastRevAcc} = Eof) ->
     case Ended orelse (LastLen == N andalso N > 0 andalso dead_state(State, Table)) of
 	true ->
@@ -940,23 +1045,38 @@ scanned(C = #lexc{lex = {lex, _Start, _AcceptLimit, Table, _, _, _}, ended = End
 scanned(C, Result) ->
     finish(C, Result).
 
-finish(C = #lexc{lex = {lex, _Start, _AcceptLimit, _Table, Actions, _, _},
+finish(C = #lexc{lex = {lex, _Start, _AcceptLimit, _Table, Actions, _, _, _PosMode},
 		 cur = Cur, stack = Stack, tail = Tail}, Result) ->
     case Result of
 	{accept, State, Len, RevAcc} ->
 	    {Cur1, Stack1} = io_skip(Cur, Stack ++ lists:reverse(Tail), Len),
 	    C1 = C#lexc{cur = Cur1, stack = Stack1, tail = []},
-	    case emit_token(Actions, State, RevAcc) of
-		no_token ->
-		    next1(C1);
-		{token, T} ->
-		    {token, T, C1}
-	    end;
+	    emitted(emit_c(C1, Actions, State, RevAcc));
 	{fail, 0, at_end} ->
 	    end_of_stream;
 	{fail, Len, _} ->
 	    check_fail(C#lexc{fail = Len})
     end.
+
+%% Run the action. Process mode: the action keeps the position in the
+%% process dictionary, and the result is used directly. Argument mode:
+%% the position is in the continuation, and passed to the action.
+
+emit_c(C = #lexc{lex = {lex, _, _, _, _, _, _, process}}, Actions, State, RevAcc) ->
+    case emit_token(Actions, State, RevAcc) of
+	no_token -> next1(C);
+	{token, T} -> {token, T, C}
+    end;
+emit_c(C = #lexc{pos = Pos}, Actions, State, RevAcc) ->
+    {Result, Pos1} = (element(State, Actions))(RevAcc, Pos),
+    {emitted, Result, C#lexc{pos = Pos1}}.
+
+emitted({emitted, no_token, C}) -> next1(C);
+emitted({emitted, {token, T}, C}) -> {token, T, C};
+emitted(Result) -> Result.
+
+c_report_pos(#lexc{lex = {lex, _, _, _, _, _, _, process}}) -> position();
+c_report_pos(#lexc{pos = Pos}) -> Pos.
 
 %% A token of Len bytes failed. In the Unicode encodings, the error may
 %% be a malformed character at or before the failing byte; with the bytes
@@ -964,12 +1084,12 @@ finish(C = #lexc{lex = {lex, _Start, _AcceptLimit, _Table, Actions, _, _},
 %% turn into invalid (or show to be fine). So while it looks incomplete
 %% and the stream has not ended, ask for more; otherwise report.
 
-check_fail(C = #lexc{lex = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL},
+check_fail(C = #lexc{lex = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, _PosMode},
 		     cur = Cur, stack = Stack, tail = Tail, ended = Ended, fail = Len}) ->
     Stack1 = Stack ++ lists:reverse(Tail),
     case Ended orelse not looks_incomplete(Enc, Cur, Stack1, Len) of
 	true ->
-	    io_report_no_match(Enc, NL, Cur, Stack1, Len);
+	    io_report_no_match(Enc, NL, c_report_pos(C), Cur, Stack1, Len);
 	false ->
 	    {more, C#lexc{stack = Stack1, tail = []}}
     end.
@@ -989,12 +1109,13 @@ looks_incomplete(Enc, Cur, Stack, Len) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% The blocking interface: a function More() is called for data
 
-one(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, _Enc, _NL}, Data, More)
+one(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, _Enc, _NL, PosMode}, Data, More)
   when is_function(More, 0) ->
     %% continue from the position in the process dictionary, as one/2
     C = feed(#lexc{lex = LEX, pos = position()}, Data),
     case drive(C, More) of
-	{token, T, C1, More1} ->
+	{token, T, C1 = #lexc{pos = Pos1}, More1} ->
+	    PosMode == argument andalso exit_pos(Pos1),
 	    {token, T, rest(C1), More1};
 	end_of_stream ->
 	    end_of_stream
@@ -1002,7 +1123,7 @@ one(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, _Enc, _NL}, Data, More)
 
 with(Regexp_rules, Data, More, Opts) when is_function(More, 0) ->
     LEX = regexps_to_table(Regexp_rules, Opts),
-    no_lines(),
+    reset_pos(LEX),
     lex_more(feed(start(LEX), Data), More, []).
 
 lex_more(C, More, Acc) ->
@@ -1085,6 +1206,9 @@ regexps_to_table(Regexp_rules0) ->
 %%     all rules are case-insensitive, as if they started with (?i);
 %%     (?-i) and (?-i:...) still switch it off
 %%
+%%   {position, process | argument}  how the drivers keep the line and
+%%     column (default process); see "Line and column counting" below
+%%
 %%   {newline, NL}  which characters end a line, for line and column
 %%     counting (see "Line and column counting" below):
 %%     unicode  LF, VT, FF, CR, CR LF, NEL, LS, PS (UTS #18 RL1.6);
@@ -1103,10 +1227,11 @@ regexps_to_table(Regexp_rules0, Opts) ->
 	    proplists:get_value(encoding, Opts, bytes)),
     Fold = proplists:get_bool(case_insensitive, Opts),
     NL = newline_option(Enc, proplists:get_value(newline, Opts, default)),
+    PosMode = position_option(proplists:get_value(position, Opts, process)),
     Regexp_rules = regexps_to_internal(Regexp_rules0, {Enc, Fold}),
     NFA = regexps_to_nfa(Regexp_rules),
     DFA = minimize_dfa(nfa_to_dfa(NFA)),
-    Lex_table = dfa_to_table(DFA, Regexp_rules, Enc, NL),
+    Lex_table = dfa_to_table(DFA, Regexp_rules, Enc, NL, PosMode),
     Lex_table.
 
 %% In bytes mode the input may be UTF-8, where 16#85 (NEL in Unicode)
@@ -1117,6 +1242,11 @@ newline_option(_Enc, default) -> unicode;
 newline_option(bytes, unicode) -> exit({unicode_newline_needs_encoding, bytes});
 newline_option(_Enc, NL) when NL == unicode; NL == ascii; NL == lf -> NL;
 newline_option(_Enc, NL) -> exit({unknown_newline, NL}).
+
+%% How the drivers keep the position, see "Line and column counting"
+
+position_option(Mode) when Mode == process; Mode == argument -> Mode;
+position_option(Mode) -> exit({unknown_position_mode, Mode}).
 
 %% Convert all regexp rules to internal form
 %%
@@ -1937,15 +2067,18 @@ dfa_to_table(DFA, Regexp_rules, Enc) ->
     dfa_to_table(DFA, Regexp_rules, Enc, newline_option(Enc, default)).
 
 dfa_to_table(DFA, Regexp_rules, Enc, NL) ->
+    dfa_to_table(DFA, Regexp_rules, Enc, NL, process).
+
+dfa_to_table(DFA, Regexp_rules, Enc, NL, PosMode) ->
     {AcceptLimit, NewDFA} = group_accepting_states(DFA),
     ?log("~p accepting states~n", [AcceptLimit]),
-    Actions = action_table(Regexp_rules, NewDFA, AcceptLimit, Enc, NL),
-    generate_code(NewDFA, AcceptLimit, Actions, Enc, NL).
+    Actions = action_table(Regexp_rules, NewDFA, AcceptLimit, Enc, NL, PosMode),
+    generate_code(NewDFA, AcceptLimit, Actions, Enc, NL, PosMode).
 
-generate_code(DFA, AcceptLimit, Actions, Enc, NL) ->
+generate_code(DFA, AcceptLimit, Actions, Enc, NL, PosMode) ->
     Table = generate_table(DFA),
     Start = start_state(DFA),
-    {lex, Start, AcceptLimit, Table, Actions, Enc, NL}.
+    {lex, Start, AcceptLimit, Table, Actions, Enc, NL, PosMode}.
 
 %% The table is a tuple of one row/element per state
 %%
@@ -2090,7 +2223,7 @@ rename_state(_X, [], Map) ->
 %%
 %% A sequence is a string (list of char) or a binary
 
-o_longest(Lex = {lex, _, _, _, _, Enc, NL}, Seq) when is_list(Seq) ->
+o_longest(Lex = {lex, _, _, _, _, Enc, NL, _PosMode}, Seq) when is_list(Seq) ->
     try o_longest_string(Lex, Seq)
     catch
 	throw:{?MODULE, no_match, RevAcc, Remainder} ->
@@ -2099,7 +2232,7 @@ o_longest(Lex = {lex, _, _, _, _, Enc, NL}, Seq) when is_list(Seq) ->
 
 %% Longest match applied to string (list of chars)
 
-o_longest_string({lex, Start, AcceptLimit, Table, Actions, _Enc, _NL}, String) 
+o_longest_string({lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}, String) 
   when is_list(String) -> 
     no_lines(),
     o_longest_string(Start, Table, AcceptLimit, Actions, String).
@@ -2323,26 +2456,45 @@ no_match(RevAcc, Remainder) ->
 %%        | not_a_byte   the input list holds something other than 0..255
 %%   L, C = the position of BadBytes
 
-report_no_match(bytes, _NL, _RevAcc, _Remainder) ->
-    no_match_exit();
 report_no_match(Enc, NL, RevAcc, Remainder) ->
+    report_no_match(Enc, NL, position(), RevAcc, Remainder).
+
+%% Pos = {Line, Col, AfterCR}: where the failed token starts
+
+report_no_match(bytes, _NL, Pos, _RevAcc, _Remainder) ->
+    no_match_exit(Pos);
+report_no_match(Enc, NL, Pos, RevAcc, Remainder) ->
     Acc = lists:reverse(RevAcc),
     Bytes = Acc ++ Remainder,
     case lex_unicode:first_error(Enc, Bytes, length(Acc)) of
 	{Kind, Offset, Bad} ->
 	    {Good, _} = lex_unicode:decode_prefix(Enc, lists:sublist(Bytes, Offset)),
-	    {Line, Col, _} = advance(position(), Good, NL),
+	    {Line, Col, _} = advance(Pos, Good, NL),
 	    exit({lex_bad_encoding, Enc, Kind,
 		  {line, Line},
 		  {column, Col},
 		  {bytes, Bad}});
 	none ->
-	    no_match_exit()
+	    no_match_exit(Pos)
     end.
 
-no_match_exit() ->
-    {Line, Col} = current_position(),
+no_match_exit({Line, Col, _AfterCR}) ->
     exit({lex_no_match, {line, Line}, {column, Col}}).
+
+%% The position to report: in process mode the drivers pass the atom
+%% process, and the position is in the process dictionary.
+
+report_pos(process) -> position();
+report_pos(Pos) -> Pos.
+
+%% For one/2,3: they continue from the position in the process
+%% dictionary (as in process mode) and leave the new one there.
+
+entry_pos(process) -> process;
+entry_pos(argument) -> position().
+
+exit_pos(process) -> ok;
+exit_pos(Pos) -> put(?pos_key, Pos).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -2393,15 +2545,61 @@ curr_char(Bin, PrevPos) ->
 %%
 %% We map (AccStateID -> Action)
 
-action_table(Regexp_rules, DFA, AcceptLimit, Enc, NL) ->
-    Acts0 = regexp_actions(Regexp_rules, Enc, NL),
+action_table(Regexp_rules, DFA, AcceptLimit, Enc, NL, PosMode) ->
+    Acts0 = regexp_actions(Regexp_rules, Enc, NL, PosMode),
     state_actions(AcceptLimit, DFA, Acts0).
 
-regexp_actions(Regexp_rules, Enc, NL) ->
+regexp_actions(Regexp_rules, Enc, NL, process) ->
     dict:from_list(
-      [ {ID, position_action(Enc, NL, the_action(Action))} 
+      [ {ID, position_action(Enc, NL, process_action(the_action(Action)))} 
+	|| {regexp, ID, _Regexp_str, Action, _Prio} <- Regexp_rules ]
+     );
+regexp_actions(Regexp_rules, Enc, NL, argument) ->
+    dict:from_list(
+      [ {ID, argument_action(Enc, NL, the_action(Action))}
 	|| {regexp, ID, _Regexp_str, Action, _Prio} <- Regexp_rules ]
      ).
+
+%% An action may take the token alone, Action(RevChars), or the token and
+%% where it starts, Action(RevChars, {Line, Column}).
+%%
+%% In process mode, the position is in the process dictionary: a
+%% 2-argument action gets it from there.
+
+process_action(Action) when is_function(Action, 2) ->
+    fun(RevChars) -> Action(RevChars, current_position()) end;
+process_action(Action) ->
+    Action.
+
+%% In argument mode, the drivers pass the position {Line, Col, AfterCR}
+%% to the wrapper, which returns {Result, NewPos}. A 2-argument action
+%% gets {Line, Col} directly; for a 1-argument action (e.g. the helpers
+%% item/1 etc., which call current_line/0) the position is put in the
+%% process dictionary for the call, and read back after it, so that
+%% inc_lines/1 still works.
+
+argument_action(Enc, NL, Action) when is_function(Action, 2) ->
+    fun(RevAcc, Pos = {Line, Col, _AfterCR}) ->
+	    {RevChars, Chars} = token_chars(Enc, RevAcc),
+	    Result = Action(RevChars, {Line, Col}),
+	    {Result, advance(Pos, Chars, NL)}
+    end;
+argument_action(Enc, NL, Action) ->
+    fun(RevAcc, Pos) ->
+	    {RevChars, Chars} = token_chars(Enc, RevAcc),
+	    put(?pos_key, Pos),
+	    Result = Action(RevChars),
+	    {Result, advance(position(), Chars, NL)}
+    end.
+
+%% The token as {RevChars, Chars}: characters (bytes in bytes mode)
+%% reversed and in order
+
+token_chars(Enc, RevAcc) when Enc == bytes; Enc == latin1 ->
+    {RevAcc, lists:reverse(RevAcc)};
+token_chars(Enc, RevBytes) ->
+    {Chars, []} = lex_unicode:decode_prefix(Enc, lists:reverse(RevBytes)),
+    {lists:reverse(Chars), Chars}.
 
 %% Every match, token or not, goes through exactly one action, so the
 %% action is wrapped to keep the position up to date: the action runs
