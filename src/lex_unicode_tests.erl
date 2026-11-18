@@ -537,6 +537,10 @@ driver_rules(_Enc, At) ->
 at2(Tag) ->
     fun(Acc, Pos) -> {token, {Tag, Pos, lists:reverse(Acc)}} end.
 
+%% and as a 3-argument action: line and column are separate arguments
+at3(Tag) ->
+    fun(Acc, Line, Col) -> {token, {Tag, {Line, Col}, lists:reverse(Acc)}} end.
+
 %% Random text: mostly characters the rules know, some they do not ('?'),
 %% and for the Unicode encodings, some broken bytes.
 random_input(Enc) ->
@@ -1114,14 +1118,17 @@ position_modes_test_() ->
              rand:seed(exsss, {5, 6, 7}),
              [ begin
                    Opts = [{encoding, Enc}],
-                   Arg = [{position, argument} | Opts],
+                   Modes = [ [{position, M} | Opts] || M <- [argument, unboxed] ],
                    Bin = random_input(Enc),
                    Ref = caught(fun() -> lex:with(driver_rules(Enc), Bin, Opts) end),
                    IoList = random_iolist(Bin),
                    Chunks = random_chunks(Bin),
-                   Ways = [{process_at2, fun() -> lex:with(driver_rules(Enc, fun at2/1), Bin, Opts) end}]
-                       ++ [ {{Name, How}, Fun}
-                            || {Name, Rules} <- [{at, driver_rules(Enc)}, {at2, driver_rules(Enc, fun at2/1)}],
+                   Ways = [{process_at2, fun() -> lex:with(driver_rules(Enc, fun at2/1), Bin, Opts) end},
+                           {process_at3, fun() -> lex:with(driver_rules(Enc, fun at3/1), Bin, Opts) end}]
+                       ++ [ {{Arg, Name, How}, Fun}
+                            || Arg <- Modes,
+                               {Name, Rules} <- [{at, driver_rules(Enc)}, {at2, driver_rules(Enc, fun at2/1)},
+                                                 {at3, driver_rules(Enc, fun at3/1)}],
                                {How, Fun} <- [{binary, fun() -> lex:with(Rules, Bin, Arg) end},
                                               {iolist, fun() -> lex:with(Rules, IoList, Arg) end},
                                               {list, fun() -> lex:with(Rules, binary_to_list(Bin), Arg) end},
@@ -1192,3 +1199,81 @@ position_mode_details_test_() ->
                    caught(fun() -> lex:with(driver_rules(bytes, fun at2/1), <<"cd\n ?">>, Arg) end)),
      ?_assertEqual({'EXIT', {unknown_position_mode, register}},
                    caught(fun() -> lex:regexps_to_table(driver_rules(bytes), [{position, register}]) end))].
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Unboxed mode ({position, unboxed}): the whole-input drivers keep line
+%% and column as separate loop arguments and compute the position after
+%% a token from the reversed token (rev_cols/3, rev_lines/4)
+
+%% the line terminator tests, in every encoding and newline mode, with
+%% each match a single character (CR LF split) or a run of them (CR LF
+%% inside a token): unboxed and process mode agree
+unboxed_line_terminators_test_() ->
+    Texts = ["a\nb\vc\fd\re\r\nf" ++ [16#85] ++ "g" ++ [16#2028] ++ "h" ++ [16#2029] ++ "i",
+             "ab\r\ncd\r\n\r\nef\rg", "\r\n\n\r\ra", "x\r", "\n\r\n\r", "αβ\r\nγ"],
+    %% build each table once (tables for \\p{L} in UTF-32 take a while)
+    Lexes = [ {NL, Enc, [ {M, lex:regexps_to_table(Rules, [{encoding, Enc}, {newline, NL}, {position, M}])}
+                          || M <- [process, unboxed] ]}
+              || NL <- [unicode, ascii, lf], Enc <- ?ENCODINGS,
+                 Rules <- [[{regexp, "\\p{L}+", at3(w)}, {regexp, "\\P{L}", at3(s)}],
+                           [{regexp, "\\p{L}+", at3(w)}, {regexp, "\\P{L}+", at3(s)}]] ],
+    Lex = fun(Table, In) when is_binary(In) -> lex:no_lines(), lex:lex_binary(Table, In);
+             (Table, In) -> lex:no_lines(), lex:lex_iolist(Table, In)
+          end,
+    [ ?_assertEqual({Text, NL, Enc, How, Lex(Process, In)}, {Text, NL, Enc, How, Lex(Unboxed, In)})
+      || {NL, Enc, [{process, Process}, {unboxed, Unboxed}]} <- Lexes, Text <- Texts,
+         Bin <- [unicode:characters_to_binary(Text, unicode, Enc)],
+         {How, In} <- [{binary, Bin}, {iolist, random_iolist(Bin)}] ].
+
+%% unboxed mode with 3-argument actions does not use the process
+%% dictionary; 1-argument actions still work (with inc_lines/1)
+unboxed_mode_test_() ->
+    Opts = [{encoding, utf8}, {position, unboxed}],
+    Rules3 = [{regexp, "\\p{L}+", at3(w)}, {regexp, "\\s+", fun(_, _, _) -> no_token end}],
+    In = <<"ab cd\n λ\r\nx"/utf8>>,
+    Expect = [{w, {1, 1}, "ab"}, {w, {1, 4}, "cd"}, {w, {2, 2}, "λ"}, {w, {3, 1}, "x"}],
+    [?_test(begin
+                Self = self(),
+                spawn(fun() ->
+                              Self ! try {ok, [lex:with(Rules3, In, Opts),
+                                               lex:with(Rules3, binary_to_list(In), Opts),
+                                               lex:with(Rules3, random_iolist(In), Opts)], get()}
+                                     catch C:E:St -> {crashed, C, E, St}
+                                     end
+                      end),
+                receive
+                    {ok, Results, Dict} ->
+                        ?assertEqual([Expect, Expect, Expect], Results),
+                        ?assertEqual([], [ KV || KV = {lex_position, _} <- Dict ]);
+                    Other ->
+                        error(Other)
+                after 4000 -> error(timeout)
+                end
+            end),
+     %% the token-at-a-time interfaces, in unboxed mode
+     ?_test(begin
+                Lex = lex:regexps_to_table(Rules3, Opts),
+                ?assertEqual({done, Expect}, lex:tokens(lex:feed(lex:feed(lex:start(Lex), In), eof))),
+                lex:no_lines(),
+                {token, {w, {1, 1}, "ab"}, R1} = lex:one(Lex, In),
+                {token, {w, {1, 4}, "cd"}, _} = lex:one(Lex, R1),
+                ?assertEqual(Expect, lex:with(Rules3, <<"ab">>, more_from([<<" cd\n λ"/utf8>>, <<"\r\nx">>], ended), Opts))
+            end),
+     ?_assertEqual([{w, {1, 1}, "c"}, {w, {11, 9}, "d"}],
+                   lex:with([{regexp, "#skip", fun(_) -> lex:inc_lines(10), no_token end},
+                             {regexp, "[c-e]+", at3(w)}, {regexp, " ", lex:whitespace()}],
+                            <<"c #skip d">>, [{position, unboxed}])),
+     %% 3-argument actions in the other modes
+     ?_assertEqual([{w, {1, 1}, "c"}, {w, {2, 1}, "d"}],
+                   lex:with([{regexp, "[c-e]+", at3(w)}, {regexp, "\n", lex:newline()}], <<"c\nd">>, [])),
+     ?_assertEqual([{w, {1, 1}, "c"}, {w, {2, 1}, "d"}],
+                   lex:with([{regexp, "[c-e]+", at3(w)}, {regexp, "\n", lex:newline()}], <<"c\nd">>,
+                            [{position, argument}])),
+     %% errors report the position
+     ?_assertEqual({'EXIT', {lex_no_match, {line, 2}, {column, 2}}},
+                   caught(fun() -> lex:with(driver_rules(bytes, fun at3/1), <<"cd\n ?">>, [{position, unboxed}]) end)),
+     ?_assertEqual({'EXIT', {lex_no_match, {line, 2}, {column, 2}}},
+                   caught(fun() -> lex:with(driver_rules(bytes, fun at3/1), [<<"cd\n">>, " ?"], [{position, unboxed}]) end)),
+     ?_assertEqual({'EXIT', {lex_bad_encoding, utf8, invalid, {line, 2}, {column, 3}, {bytes, [16#FF]}}},
+                   caught(fun() -> lex:with(Rules3, <<"ab\n λ"/utf8, 16#FF>>, Opts) end))].

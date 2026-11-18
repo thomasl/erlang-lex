@@ -500,6 +500,8 @@ one_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, process}
 	throw:{?MODULE, bin_no_match, Bin1, Len, Pos} ->
 	    bin_report_no_match(Enc, NL, Pos, Bin1, Len)
     end;
+one_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, _Enc, _NL, unboxed}, Bin) ->
+    one_binary(to_argument(LEX), Bin);
 one_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, argument}, Bin) ->
     try bin_longest_a(LEX, Bin, entry_pos(argument)) of
 	{token, T, Rest, Pos1} ->
@@ -553,7 +555,8 @@ lex_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, PosMode}
     try
 	case PosMode of
 	    process -> lex_binary(LEX, Bin, []);
-	    argument -> lex_binary_a(LEX, Bin, {1, 1, false}, [])
+	    argument -> lex_binary_a(LEX, Bin, {1, 1, false}, []);
+	    unboxed -> lex_binary_u(LEX, Bin, 1, 1, false, [])
 	end
     catch
 	throw:{?MODULE, bin_no_match, Bin1, Len, Pos} ->
@@ -565,7 +568,16 @@ lex_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, PosMode}
 %% the dictionary is not used at all.
 
 reset_pos({lex, _, _, _, _, _, _, process}) -> no_lines();
-reset_pos({lex, _, _, _, _, _, _, argument}) -> ok.
+reset_pos({lex, _, _, _, _, _, _, _ArgumentOrUnboxed}) -> ok.
+
+%% An unboxed table as an argument mode one: for the drivers that return
+%% after each token (one/2,3, the incremental interface), which hand the
+%% position back to their caller anyway.
+
+to_argument({lex, Start, AcceptLimit, Table, {unboxed, _Unboxed, Wrappers}, Enc, NL, unboxed}) ->
+    {lex, Start, AcceptLimit, Table, Wrappers, Enc, NL, argument};
+to_argument(LEX) ->
+    LEX.
 
 %% Raise each process flag to at least Value (capped); returns the
 %% [{Flag, OldValue}] to restore.
@@ -711,6 +723,8 @@ one_iolist(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, process}
 	throw:{?MODULE, io_no_match, Cur, Stack, Len, Pos} ->
 	    io_report_no_match(Enc, NL, Pos, Cur, Stack, Len)
     end;
+one_iolist(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, _Enc, _NL, unboxed}, IoData) ->
+    one_iolist(to_argument(LEX), IoData);
 one_iolist(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, argument}, IoData) ->
     try io_longest_a(LEX, IoData, [], entry_pos(argument)) of
 	{token, T, {Cur, Stack}, Pos1} ->
@@ -728,7 +742,8 @@ lex_iolist(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, PosMode}
     try
 	case PosMode of
 	    process -> lex_iolist(LEX, IoData, [], []);
-	    argument -> lex_iolist_a(LEX, IoData, [], {1, 1, false}, [])
+	    argument -> lex_iolist_a(LEX, IoData, [], {1, 1, false}, []);
+	    unboxed -> lex_iolist_u(LEX, IoData, [], 1, 1, false, [])
 	end
     catch
 	throw:{?MODULE, io_no_match, Cur, Stack, Len, Pos} ->
@@ -974,7 +989,7 @@ io_take(Bad, _Stack, _K, Acc) ->
 	}).
 
 start(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, _Enc, _NL, _PosMode}) ->
-    #lexc{lex = LEX}.
+    #lexc{lex = to_argument(LEX)}.
 
 feed(#lexc{ended = true}, _Data) ->
     exit(lex_feed_after_eof);
@@ -1109,9 +1124,10 @@ looks_incomplete(Enc, Cur, Stack, Len) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% The blocking interface: a function More() is called for data
 
-one(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, _Enc, _NL, PosMode}, Data, More)
+one(LEX0 = {lex, _Start, _AcceptLimit, _Table, _Actions, _Enc, _NL, _PosMode}, Data, More)
   when is_function(More, 0) ->
     %% continue from the position in the process dictionary, as one/2
+    LEX = {lex, _, _, _, _, _, _, PosMode} = to_argument(LEX0),
     C = feed(#lexc{lex = LEX, pos = position()}, Data),
     case drive(C, More) of
 	{token, T, C1 = #lexc{pos = Pos1}, More1} ->
@@ -1182,6 +1198,126 @@ dead_row(Row, I) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
+%% Unboxed whole-input drivers ({position, unboxed})
+%%
+%% The binary and iolist drivers for with/2,3, with the position as three
+%% loop arguments, Line, Col and AfterCR, rather than a tuple. A
+%% 3-argument action is called directly as Action(RevChars, Line, Col).
+%% The position after the token is computed from the reversed token,
+%% without reversing it: rev_cols/3 counts the characters after the last
+%% line terminator (all of them if there is none), and only if there is
+%% a terminator, rev_lines/4 counts the line breaks. Both return
+%% integers, so nothing is allocated for the position.
+
+lex_binary_u(_LEX, <<>>, _Line, _Col, _AfterCR, Acc) ->
+    lists:reverse(Acc);
+lex_binary_u(LEX = {lex, Start, AcceptLimit, Table, {unboxed, Actions, _}, Enc, _NL, _},
+	     Bin, Line, Col, AfterCR, Acc) ->
+    case scan(Bin, Start, Table, AcceptLimit, 0, [], 0, 0, []) of
+	{accept, State, Len, RevAcc} ->
+	    <<_:Len/binary, Rest/binary>> = Bin,
+	    RevChars = rev_chars(Enc, RevAcc),
+	    case element(State, Actions) of
+		{dict, Action} ->
+		    put(?pos_key, {Line, Col, AfterCR}),
+		    Result = Action(RevChars),
+		    {Line0, Col0, AfterCR0} = position(),
+		    u_next(binary, LEX, Rest, Result, RevChars, Line0, Col0, AfterCR0, Acc);
+		Action ->
+		    Result = Action(RevChars, Line, Col),
+		    u_next(binary, LEX, Rest, Result, RevChars, Line, Col, AfterCR, Acc)
+	    end;
+	{fail, Len} ->
+	    throw({?MODULE, bin_no_match, Bin, Len, {Line, Col, AfterCR}})
+    end.
+
+lex_iolist_u(LEX = {lex, Start, AcceptLimit, Table, {unboxed, Actions, _}, Enc, _NL, _},
+	     Cur, Stack, Line, Col, AfterCR, Acc) ->
+    case io_eof(io_scan(Cur, Stack, Start, Table, AcceptLimit, 0, [], 0, 0, [])) of
+	{accept, State, Len, RevAcc} ->
+	    Rest = io_skip(Cur, Stack, Len),
+	    RevChars = rev_chars(Enc, RevAcc),
+	    case element(State, Actions) of
+		{dict, Action} ->
+		    put(?pos_key, {Line, Col, AfterCR}),
+		    Result = Action(RevChars),
+		    {Line0, Col0, AfterCR0} = position(),
+		    u_next(iolist, LEX, Rest, Result, RevChars, Line0, Col0, AfterCR0, Acc);
+		Action ->
+		    Result = Action(RevChars, Line, Col),
+		    u_next(iolist, LEX, Rest, Result, RevChars, Line, Col, AfterCR, Acc)
+	    end;
+	{fail, 0, at_end} ->
+	    lists:reverse(Acc);
+	{fail, Len, _} ->
+	    throw({?MODULE, io_no_match, Cur, Stack, Len, {Line, Col, AfterCR}})
+    end.
+
+%% advance over the token, then continue with the next one
+
+u_next(Kind, LEX = {lex, _, _, _, _, _, NL, _}, Rest, Result, RevChars, Line, Col, AfterCR, Acc) ->
+    case rev_cols(RevChars, NL, 0) of
+	K when K < 0 ->
+	    %% no line terminator: -K-1 more columns on the same line
+	    u_cont(Kind, LEX, Rest, Result, Line, Col - K - 1, false, Acc);
+	K ->
+	    u_cont(Kind, LEX, Rest, Result, Line + rev_lines(RevChars, AfterCR, NL, 0), K + 1,
+		   ends_in_cr(RevChars, NL), Acc)
+    end.
+
+u_cont(binary, LEX, Rest, no_token, Line, Col, AfterCR, Acc) ->
+    lex_binary_u(LEX, Rest, Line, Col, AfterCR, Acc);
+u_cont(binary, LEX, Rest, {token, T}, Line, Col, AfterCR, Acc) ->
+    lex_binary_u(LEX, Rest, Line, Col, AfterCR, [T|Acc]);
+u_cont(iolist, LEX, {Cur, Stack}, no_token, Line, Col, AfterCR, Acc) ->
+    lex_iolist_u(LEX, Cur, Stack, Line, Col, AfterCR, Acc);
+u_cont(iolist, LEX, {Cur, Stack}, {token, T}, Line, Col, AfterCR, Acc) ->
+    lex_iolist_u(LEX, Cur, Stack, Line, Col, AfterCR, [T|Acc]).
+
+%% the token's characters, reversed (bytes in bytes mode)
+
+rev_chars(Enc, RevAcc) when Enc == bytes; Enc == latin1 ->
+    RevAcc;
+rev_chars(Enc, RevBytes) ->
+    {Chars, []} = lex_unicode:decode_prefix(Enc, lists:reverse(RevBytes)),
+    lists:reverse(Chars).
+
+%% rev_cols(RevChars, NL, 0): the number of characters after the last
+%% line terminator, or -(N+1) if there is none (N = all characters).
+
+rev_cols([C | Cs], NL, K) when C > $\r, C < 16#85 ->
+    rev_cols(Cs, NL, K+1);
+rev_cols([C | Cs], NL, K) ->
+    case is_line_terminator(C, NL) of
+	true -> K;
+	false -> rev_cols(Cs, NL, K+1)
+    end;
+rev_cols([], _NL, K) ->
+    -K - 1.
+
+%% rev_lines(RevChars, AfterCR, NL, 0): the number of line breaks, as
+%% advance/3 counts them: the LF of a CR LF does not count, nor an LF
+%% that starts the token right after a CR (AfterCR).
+
+rev_lines([C | Cs], AfterCR, NL, N) when C > $\r, C < 16#85 ->
+    rev_lines(Cs, AfterCR, NL, N);
+rev_lines([$\n], true, _NL, N) ->
+    N;
+rev_lines([$\n, $\r | Cs], AfterCR, NL, N) when NL =/= lf ->
+    rev_lines([$\r | Cs], AfterCR, NL, N);
+rev_lines([C | Cs], AfterCR, NL, N) ->
+    case is_line_terminator(C, NL) of
+	true -> rev_lines(Cs, AfterCR, NL, N+1);
+	false -> rev_lines(Cs, AfterCR, NL, N)
+    end;
+rev_lines([], _AfterCR, _NL, N) ->
+    N.
+
+ends_in_cr([$\r | _], NL) -> NL =/= lf;
+ends_in_cr(_RevChars, _NL) -> false.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
 %% Quick entrypoint - old version
 
 o_with(Regexp_rules, String) ->
@@ -1206,8 +1342,9 @@ regexps_to_table(Regexp_rules0) ->
 %%     all rules are case-insensitive, as if they started with (?i);
 %%     (?-i) and (?-i:...) still switch it off
 %%
-%%   {position, process | argument}  how the drivers keep the line and
-%%     column (default process); see "Line and column counting" below
+%%   {position, process | argument | unboxed}  how the drivers keep the
+%%     line and column (default process); see "Line and column counting"
+%%     below
 %%
 %%   {newline, NL}  which characters end a line, for line and column
 %%     counting (see "Line and column counting" below):
@@ -1245,7 +1382,7 @@ newline_option(_Enc, NL) -> exit({unknown_newline, NL}).
 
 %% How the drivers keep the position, see "Line and column counting"
 
-position_option(Mode) when Mode == process; Mode == argument -> Mode;
+position_option(Mode) when Mode == process; Mode == argument; Mode == unboxed -> Mode;
 position_option(Mode) -> exit({unknown_position_mode, Mode}).
 
 %% Convert all regexp rules to internal form
@@ -2545,6 +2682,15 @@ curr_char(Bin, PrevPos) ->
 %%
 %% We map (AccStateID -> Action)
 
+action_table(Regexp_rules, DFA, AcceptLimit, Enc, NL, unboxed) ->
+    %% the actions for the unboxed whole-input drivers, and the argument
+    %% mode wrappers for the other drivers (see to_argument/1)
+    Unboxed = dict:from_list(
+		[ {ID, unboxed_action(the_action(Action))}
+		  || {regexp, ID, _Regexp_str, Action, _Prio} <- Regexp_rules ]),
+    {unboxed,
+     state_actions(AcceptLimit, DFA, Unboxed),
+     state_actions(AcceptLimit, DFA, regexp_actions(Regexp_rules, Enc, NL, argument))};
 action_table(Regexp_rules, DFA, AcceptLimit, Enc, NL, PosMode) ->
     Acts0 = regexp_actions(Regexp_rules, Enc, NL, PosMode),
     state_actions(AcceptLimit, DFA, Acts0).
@@ -2566,6 +2712,8 @@ regexp_actions(Regexp_rules, Enc, NL, argument) ->
 %% In process mode, the position is in the process dictionary: a
 %% 2-argument action gets it from there.
 
+process_action(Action) when is_function(Action, 3) ->
+    fun(RevChars) -> {Line, Col} = current_position(), Action(RevChars, Line, Col) end;
 process_action(Action) when is_function(Action, 2) ->
     fun(RevChars) -> Action(RevChars, current_position()) end;
 process_action(Action) ->
@@ -2578,6 +2726,8 @@ process_action(Action) ->
 %% process dictionary for the call, and read back after it, so that
 %% inc_lines/1 still works.
 
+argument_action(Enc, NL, Action) when is_function(Action, 3) ->
+    argument_action(Enc, NL, fun(RevChars, {Line, Col}) -> Action(RevChars, Line, Col) end);
 argument_action(Enc, NL, Action) when is_function(Action, 2) ->
     fun(RevAcc, Pos = {Line, Col, _AfterCR}) ->
 	    {RevChars, Chars} = token_chars(Enc, RevAcc),
@@ -2591,6 +2741,18 @@ argument_action(Enc, NL, Action) ->
 	    Result = Action(RevChars),
 	    {Result, advance(position(), Chars, NL)}
     end.
+
+%% In unboxed mode, the whole-input drivers call a 3-argument action
+%% Action(RevChars, Line, Col) directly; a 2-argument action is adapted;
+%% a 1-argument action is marked {dict, Action}: the driver puts the
+%% position in the process dictionary for it (and reads it back).
+
+unboxed_action(Action) when is_function(Action, 3) ->
+    Action;
+unboxed_action(Action) when is_function(Action, 2) ->
+    fun(RevChars, Line, Col) -> Action(RevChars, {Line, Col}) end;
+unboxed_action(Action) ->
+    {dict, Action}.
 
 %% The token as {RevChars, Chars}: characters (bytes in bytes mode)
 %% reversed and in order

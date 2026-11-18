@@ -156,9 +156,9 @@ Compile the rules. `Options` is a list of:
 - `{newline, unicode | ascii | lf}`: which characters end a line, see
   [Line and column counting](#line-and-column-counting); default
   `unicode`, or `ascii` in the `bytes` encoding
-- `{position, process | argument}`: whether the drivers keep the line and
-  column in the process dictionary (default) or pass them as arguments,
-  see [Position as an argument](#position-as-an-argument)
+- `{position, process | argument | unboxed}`: whether the drivers keep
+  the line and column in the process dictionary (default) or pass them
+  as arguments, see [Position as an argument](#position-as-an-argument)
 
 Errors in the rules exit here, see [Errors](#errors). The table is
 `{lex, Start, AcceptLimit, Table, Actions, Enc, NL}`; treat it as opaque.
@@ -527,6 +527,41 @@ the new position in a tuple. 1-argument actions in argument mode pay for
 both. The reason to use argument mode is that the position is then plain
 data rather than state of the process. (The non-blocking interface keeps
 a position per stream in either mode.)
+
+#### Unboxed position: 3-argument actions
+
+With `{position, unboxed}`, the whole-input drivers (`with/2,3`, for a
+binary or an iolist) keep the line, the column and the CR flag as three
+separate arguments of their loop, and call 3-argument actions directly:
+
+```erlang
+fun(Acc, Line, Column) -> {token, ...} | no_token
+```
+
+Nothing is allocated for the position: the position after a token is
+computed from the reversed token itself, by counting the characters
+after its last line terminator, and only when it has one, its line
+breaks. (The other modes reverse every token to advance the position.)
+2- and 1-argument actions work in this mode too, and 3-argument actions
+work in the other two modes.
+
+The drivers that return after each token (`one/2,3` and the
+[non-blocking interface](#incremental-input)) return a position anyway,
+so in unboxed mode they work as in argument mode.
+
+This is faster for whole inputs, most for `bytes`, where the token does
+not have to be decoded (and so is never reversed). The same measurements
+as above:
+
+| Input | Process mode | Argument mode, 2-argument actions | Unboxed mode, 3-argument actions | Unboxed mode, 1-argument actions |
+|---|---|---|---|---|
+| `bytes`, binary | 36 ms | 36 ms | 27 ms | 41 ms |
+| `bytes`, flat list | 38 ms | 38 ms | 36 ms | 40 ms |
+| `utf8`, binary | 40 ms | 37 ms | 37 ms | 40 ms |
+| `utf8`, 4 KB chunks | 137 ms | 141 ms | 142 ms | 145 ms |
+
+(`bytes`, binary: 25% faster. The 4 KB chunks go through the
+non-blocking interface, so unboxed mode does not apply.)
 
 ### Other utilities
 
