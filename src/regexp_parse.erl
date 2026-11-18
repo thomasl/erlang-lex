@@ -24,13 +24,14 @@
 %%   when we use this? Latin-1? UTF-8? Unicode?)
 
 -module(regexp_parse).
--export([string/1, format_error/1]).
+-export([string/1, string/2, format_error/1]).
 
 -import(string, [substr/2,substr/3]).
 -import(lists, [reverse/1]).
 
 -type errordesc() :: term().
 -opaque regexp() :: term().
+-type mode() :: bytes | unicode.
 
 %% parse(RegExp) -> {ok,RE} | {error,E}.
 %%  Parse the regexp described in the string RegExp.
@@ -52,12 +53,32 @@
 %%   and so on with more chars (note that this looks different in my emacs,
 %%   perhaps because it's still interpreted as Latin-1?)
 %%   But ... strings should be UTF-8 according to the docs.
-%% - For future use, to fully handle unicode we need character classes and
-%%   operations that match 1 "char" = multiple bytes
+%%
+%% string(S, unicode) is the code point parser used for the Unicode
+%% encodings (see lex_unicode.erl). Differences from bytes mode:
+%% - the regexp is NOT converted to UTF-8; every element is a code point
+%% - \x{HHHHHH} accepts code points up to 10FFFF
+%% - \p{Name}, \pX, \P{Name}, \PX are named classes (Perl syntax),
+%%   both on their own and inside [...]; they parse as {prop, Neg, Name}
+%% - \d \s \w (and \D \S \W) are Perl's Unicode classes: \p{Nd},
+%%   \p{White_Space}, \p{Word} (in bytes mode they still mean DEL, SPACE
+%%   and 'w')
 
-string(S0) ->
-    S = binary_to_list(unicode:characters_to_binary(S0)),
-    case catch reg(S) of
+string(S) -> string(S, bytes).
+
+-spec string(RegExp, Mode) -> ParseRes when
+      RegExp :: unicode:chardata(),
+      Mode :: mode(),
+      ParseRes :: {ok, RE} | {error, Error},
+      RE :: regexp(),
+      Error :: errordesc().
+
+string(S0, Mode) ->
+    S = case Mode of
+            bytes -> binary_to_list(unicode:characters_to_binary(S0));
+            unicode -> unicode:characters_to_list(S0)
+        end,
+    case catch reg(S, Mode) of
 	{R,[]} -> {ok,R};
 	{_R,[C|_]} -> {error,{illegal,[C]}};
 	{error,E} -> {error,E}
@@ -100,33 +121,33 @@ format_error({char_class,What}) ->
 %%  The grammar of the current regular expressions. The actual parser
 %%  is a recursive descent implementation of the grammar.
 
-reg(S) -> reg1(S).
+reg(S, M) -> reg1(S, M).
 
 %% reg1 -> reg2 reg1'
 %% reg1' -> "|" reg2
 %% reg1' -> empty
 
-reg1(S0) ->
-    {L,S1} = reg2(S0),
-    reg1p(S1, L).
+reg1(S0, M) ->
+    {L,S1} = reg2(S0, M),
+    reg1p(S1, L, M).
 
-reg1p([$||S0], L) ->
-    {R,S1} = reg2(S0),
-    reg1p(S1, {'or',L,R});
-reg1p(S, L) -> {L,S}.
+reg1p([$||S0], L, M) ->
+    {R,S1} = reg2(S0, M),
+    reg1p(S1, {'or',L,R}, M);
+reg1p(S, L, _M) -> {L,S}.
 
 %% reg2 -> reg3 reg2'
 %% reg2' -> reg3
 %% reg2' -> empty
 
-reg2(S0) ->
-    {L,S1} = reg3(S0),
-    reg2p(S1, L).
+reg2(S0, M) ->
+    {L,S1} = reg3(S0, M),
+    reg2p(S1, L, M).
 
-reg2p([C|S0], L) when C =/= $|, C =/= $) ->
-    {R,S1} = reg3([C|S0]),
-    reg2p(S1, {concat,L,R});
-reg2p(S, L) -> {L,S}.
+reg2p([C|S0], L, M) when C =/= $|, C =/= $) ->
+    {R,S1} = reg3([C|S0], M),
+    reg2p(S1, {concat,L,R}, M);
+reg2p(S, L, _M) -> {L,S}.
 
 %% reg3 -> reg4 reg3'
 %% reg3' -> "*" reg3'
@@ -134,8 +155,8 @@ reg2p(S, L) -> {L,S}.
 %% reg3' -> "?" reg3'
 %% reg3' -> empty
 
-reg3(S0) ->
-    {L,S1} = reg4(S0),
+reg3(S0, M) ->
+    {L,S1} = reg4(S0, M),
     reg3p(S1, L).
 
 reg3p([$*|S], L) -> reg3p(S, {kclosure,L});
@@ -147,32 +168,37 @@ reg3p(S, L) -> {L,S}.
                 C >= $A andalso C =< $F orelse 
                 C >= $a andalso C =< $f).
 
-reg4([$(|S0]) ->
-    case reg(S0) of
+reg4([$(|S0], M) ->
+    case reg(S0, M) of
 	{R,[$)|S1]} -> {R,S1};
 	{_R,_S} -> throw({error,{unterminated,"("}})
     end;
-reg4([$\\,O1,O2,O3|S]) when
+reg4([$\\,O1,O2,O3|S], _M) when
   O1 >= $0, O1 =< $7, O2 >= $0, O2 =< $7, O3 >= $0, O3 =< $7 ->
     {(O1*8 + O2)*8 + O3 - 73*$0,S};
-reg4([$\\,$x,H1,H2|S]) when ?HEX(H1), ?HEX(H2) ->
+reg4([$\\,$x,H1,H2|S], _M) when ?HEX(H1), ?HEX(H2) ->
     {erlang:list_to_integer([H1,H2], 16),S};
-reg4([$\\,$x,${|S]) ->
-    hex(S, []);
-reg4([$\\,$x|_]) ->
+reg4([$\\,$x,${|S], M) ->
+    hex(S, [], M);
+reg4([$\\,$x|_], _M) ->
     throw({error,{illegal,[$x]}});
-reg4([$\\,C|S]) -> {escape_char(C),S};
-reg4([$\\]) -> throw({error,{unterminated,"\\"}});
-reg4([$^|S]) -> {bos,S};
-reg4([$$|S]) -> {eos,S};
-reg4([$.|S]) -> {{comp_class,"\n"},S};
-reg4("[^" ++ S0) ->
-    case char_class(S0) of
+reg4([$\\,C|S], unicode) when C == $p; C == $P ->
+    prop(C, S);
+reg4([$\\,C|S], unicode) when C == $d; C == $D; C == $s; C == $S;
+                               C == $w; C == $W ->
+    {perl_class(C),S};
+reg4([$\\,C|S], _M) -> {escape_char(C),S};
+reg4([$\\], _M) -> throw({error,{unterminated,"\\"}});
+reg4([$^|S], _M) -> {bos,S};
+reg4([$$|S], _M) -> {eos,S};
+reg4([$.|S], _M) -> {{comp_class,"\n"},S};
+reg4("[^" ++ S0, M) ->
+    case char_class(S0, M) of
 	{Cc,[$]|S1]} -> {{comp_class,Cc},S1};
 	{_Cc,_S} -> throw({error,{unterminated,"["}})
     end;
-reg4([$[|S0]) ->
-    case char_class(S0) of
+reg4([$[|S0], M) ->
+    case char_class(S0, M) of
 	{Cc,[$]|S1]} -> {{char_class,Cc},S1};
 	{_Cc,_S1} -> throw({error,{unterminated,"["}})
     end;
@@ -181,21 +207,47 @@ reg4([$[|S0]) ->
 %	{St,[$"|S1]} -> {St,S1};
 %	{St,S1} -> throw({error,{unterminated,"\""}})
 %    end;
-reg4([C|S]) when C =/= $*, C =/= $+, C =/= $?, C =/= $] -> {C,S};
-reg4([C|_S]) -> throw({error,{illegal,[C]}});
-reg4([]) -> {epsilon,[]}.
+reg4([C|S], _M) when C =/= $*, C =/= $+, C =/= $?, C =/= $] -> {C,S};
+reg4([C|_S], _M) -> throw({error,{illegal,[C]}});
+reg4([], _M) -> {epsilon,[]}.
 
-hex([C|Cs], L) when ?HEX(C) ->
-    hex(Cs, [C|L]);
-hex([$}|S], L) ->
-    case catch erlang:list_to_integer(lists:reverse(L), 16) of
-        V when V =< 16#FF ->
+hex([C|Cs], L, M) when ?HEX(C) ->
+    hex(Cs, [C|L], M);
+hex([$}|S], L, M) ->
+    Max = case M of
+              bytes -> 16#FF;
+              unicode -> 16#10FFFF
+          end,
+    try erlang:list_to_integer(lists:reverse(L), 16) of
+        V when V =< Max ->
             {V,S};
         _ ->
             throw({error,{illegal,[$}]}})
+    catch
+        error:badarg ->
+            throw({error,{illegal,[$}]}})
     end;
-hex(_S, _) ->
+hex(_S, _, _M) ->
     throw({error,{unterminated,"\\x{"}}).
+
+%% \p{Name} \pX \P{Name} \PX  ->  {prop, Negated, Name}
+%% (the name is resolved later, by lex_unicode:property/1)
+
+prop(P, [${|S0]) ->
+    case lists:splitwith(fun(C) -> C =/= $} end, S0) of
+        {Name, [$}|S1]} when Name =/= [] -> {{prop, P == $P, Name}, S1};
+        {[], [$}|_]} -> throw({error,{illegal,[P,${,$}]}});
+        _ -> throw({error,{unterminated,[$\\,P,${]}})
+    end;
+prop(P, [C|S]) when C =/= ${ -> {{prop, P == $P, [C]}, S};
+prop(P, []) -> throw({error,{unterminated,[$\\,P]}}).
+
+perl_class($d) -> {prop, false, "Nd"};
+perl_class($D) -> {prop, true, "Nd"};
+perl_class($s) -> {prop, false, "White_Space"};
+perl_class($S) -> {prop, true, "White_Space"};
+perl_class($w) -> {prop, false, "Word"};
+perl_class($W) -> {prop, true, "Word"}.
 
 escape_char($n) -> $\n;				%\n = LF
 escape_char($r) -> $\r;				%\r = CR
@@ -208,29 +260,38 @@ escape_char($s) -> $\s;				%\s = SPACE
 escape_char($d) -> $\d;				%\d = DEL
 escape_char(C) -> C.
 
-char_class([$]|S]) -> char_class(S, [$]]);
-char_class(S) -> char_class(S, []).
+char_class([$]|S], M) -> char_class(S, [$]], M);
+char_class(S, M) -> char_class(S, [], M).
 
-char($\\, [O1,O2,O3|S]) when
+char($\\, [O1,O2,O3|S], _M) when
   O1 >= $0, O1 =< $7, O2 >= $0, O2 =< $7, O3 >= $0, O3 =< $7 ->
     {(O1*8 + O2)*8 + O3 - 73*$0,S};
-char($\\, [$x,H1,H2|S]) when ?HEX(H1), ?HEX(H2) ->
+char($\\, [$x,H1,H2|S], _M) when ?HEX(H1), ?HEX(H2) ->
     {erlang:list_to_integer([H1,H2], 16),S};
-char($\\,[$x,${|S]) ->
-    hex(S, []);
-char($\\,[$x|_]) ->
+char($\\,[$x,${|S], M) ->
+    hex(S, [], M);
+char($\\,[$x|_], _M) ->
     throw({error,{illegal,[$x]}});
-char($\\, [C|S]) -> {escape_char(C),S};
-char(C, S) -> {C,S}.
+char($\\, [C|S], unicode) when C == $p; C == $P ->
+    prop(C, S);
+char($\\, [C|S], unicode) when C == $d; C == $D; C == $s; C == $S;
+                              C == $w; C == $W ->
+    {perl_class(C),S};
+char($\\, [C|S], _M) -> {escape_char(C),S};
+char(C, S, _M) -> {C,S}.
 
-char_class([C1|S0], Cc) when C1 =/= $] ->
-    case char(C1, S0) of
-	{Cf,[$-,C2|S1]} when C2 =/= $] ->
-	    case char(C2, S1) of
-		{Cl,S2} when Cf < Cl -> char_class(S2, [{Cf,Cl}|Cc]); 
+%% A class element is a character, a range {From,To} or (unicode mode)
+%% a named class {prop, Neg, Name}. A named class cannot be a range
+%% endpoint; "[\\p{L}-x]" means \p{L}, '-' or 'x' (as in Perl).
+
+char_class([C1|S0], Cc, M) when C1 =/= $] ->
+    case char(C1, S0, M) of
+	{Cf,[$-,C2|S1]} when C2 =/= $], is_integer(Cf) ->
+	    case char(C2, S1, M) of
+		{Cl,S2} when is_integer(Cl), Cf < Cl -> char_class(S2, [{Cf,Cl}|Cc], M);
 		{Cl,_S2} -> throw({error,{char_class,[Cf,$-,Cl]}})
 	    end;
-	{C,S1} -> char_class(S1, [C|Cc])
+	{C,S1} -> char_class(S1, [C|Cc], M)
     end;
-char_class(S, Cc) -> {Cc,S}.
+char_class(S, Cc, _M) -> {Cc,S}.
 

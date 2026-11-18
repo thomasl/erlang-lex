@@ -17,14 +17,11 @@ TODO:
   * current default is to fail on no match, but tools like lex/flex instead
     emit/skip the current char as a default and continue
 - support for lexing on binaries
-  * currently experimental support
+  * accepted as input, but converted to a list of bytes
 - support for incremental lexing 
   (basically return 'current state' and allow resume later)
-- only supports ASCII, in particular no UTF-8 support
-  * support UTF-8 literals
-  * support matching single UTF-8 character (variable byte length)
-  * support full UTF-8 regexps with character classes, etc
-    (probably also needs codegen)
+- Unicode: done for UTF-8, UTF-16 and UTF-32, see doc/README.md
+  * possible: POSIX [:alpha:] classes, case-insensitive matching
 - code generation
   * emit a table as a constant data structure, and the lex driver with it,
     and a suitable API

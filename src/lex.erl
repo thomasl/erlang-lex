@@ -42,17 +42,11 @@
 %%    (or insert a least-prio regexp "." that skips and perhaps warns)
 %%    = I think this was the approach of original lex/flex
 %% - add better alt-syntax for regexps, they can get pretty ugly now
-%% - only handles 8-bit ASCII, will require a rewrite to handle larger charsets
-%%   * curr. table requires about (s * c) words, where s is the number
-%%     of states and c the number of characters
-%%     = for 100 states and 65K characters, we get a table of about 26 MB
-%%       which is normally impractical
-%%     = using dict or equivalent slows down every state access, so
-%%       we need an optimized final representation
-%%   * curr. lex drivers work one byte at a time -- they will have to
-%%     be rewritten to munch 1 character at a time (this is probably
-%%     straightforward)
-%%   * probably other issues as well
+%% - larger charsets: Unicode is handled by lowering characters and
+%%   classes to byte sequences in the chosen encoding (see
+%%   lex_unicode.erl), so the table and drivers still work on bytes
+%%   (an alternative would be 1 character at a time, but the table
+%%   would need (s * c) words, e.g. 26 MB for 100 states and 65K chars)
 %% - permit more generous regexps? I don't know what are suitable ones
 %%   * flex has, e.g., match beginning of line
 %% - the regexp ".*" should probably be replaced by "[^\n]*", which
@@ -77,12 +71,10 @@
 %% some finer details also remain to be addressed:
 %% - what if {seq, []}? (never happens, normally)
 %% - what if {disj, []}? (dito)
-%% - lexing UTF8 (as defined in RFC 3629)
-%%   1. characters are multibyte, UTF-8 when N > 127 (non-ASCII)
-%%      + detect malformed UTF8
-%%   2. handle UTF8 literals, translate to appropriate byte sequence
-%%      (perl also has character classes and whatnot, do we need to do that?)
-%%   3. any other unicode gotchas to handle?
+%% - lexing UTF8 (as defined in RFC 3629), UTF-16, UTF-32: done, see
+%%   regexps_to_table/2 and lex_unicode.erl
+%%   * not done: case-insensitive matching, POSIX [:classes:],
+%%     normalization (NFC/NFD), grapheme clusters
 %%
 %% Compile-time flags:
 %% DEBUG - enable debug output
@@ -94,13 +86,17 @@
 -author('thomasl_erlang@yahoo.com').
 -export(
    [one/2,
-    with/2
+    with/2,
+    with/3
    ]).
 -export([o_with/2,
 	 regexps_to_table/1,
+	 regexps_to_table/2,
 	 regexps_to_nfa/1,
 	 nfa_to_dfa/1,
-	 dfa_to_table/2
+	 minimize_dfa/1,
+	 dfa_to_table/2,
+	 dfa_to_table/3
 	]).
 
 %% library functions for using the generated lexer
@@ -149,15 +145,16 @@
 
 %% ?max_char is currently used to decide the "charset size"
 %% we permit characters 0-?maxchar (excepting ?no_match,)
+%%
+%% The table always works on bytes. Unicode encodings are handled by
+%% lowering each character (class) to byte sequences, see lex_unicode.erl.
 
 -define(max_char, 255).
 
-%% Possibly not needed, but for the sake of symmetry
-%%
-%% NOTE: currently,the code generator relies on doing "element" on
-%%  tuples, so we _can't_ handle  ?min_char = 0 ...
+%% Byte 0 is needed for UTF-16/UTF-32 (and is a legal latin1 char).
+%% Rows are tuples, so next_state/2 indexes with Char+1.
 
--define(min_char, 1).
+-define(min_char, 0).
 
 %% ?no_match is a reserved state indicating error/no match possible
 %%
@@ -202,9 +199,20 @@
 %%  on the next position
 
 with(Regexp_rules, Str) ->
-    LEX  = regexps_to_table(Regexp_rules),
+    with(Regexp_rules, Str, []).
+
+%% Options: see regexps_to_table/2. Input is a binary or a list of bytes
+%% (in the legacy 'bytes' encoding, a list of chars 0..255 as before).
+
+with(Regexp_rules, Input, Opts) ->
+    LEX  = regexps_to_table(Regexp_rules, Opts),
     no_lines(),
-    lex_string(LEX, Str).
+    lex_string(LEX, input_list(Input)).
+
+input_list(Bin) when is_binary(Bin) ->
+    binary_to_list(Bin);
+input_list(List) when is_list(List) ->
+    List.
 
 %% (testing: convert file to string)
 f(File) ->
@@ -242,15 +250,28 @@ lex_string(LEX, Str, Acc) ->
 %%  {no_match, Line, AccToken, RestString}
 %%  end_of_stream
 
-one(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions}, String) ->
-    longest_string(LEX, String).
+%%  ... or exits with {lex_no_match, ...} or (for the Unicode encodings)
+%%  {lex_bad_encoding, ...}, see report_no_match/3.
+%%
+%% The input is a binary or a list of bytes. In the Unicode encodings,
+%% the rest string returned is also a list of bytes, and the action
+%% receives the token as a (reversed) list of code points.
+
+one(LEX, Bin) when is_binary(Bin) ->
+    one(LEX, binary_to_list(Bin));
+one(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc}, String) ->
+    try longest_string(LEX, String)
+    catch
+	throw:{?MODULE, no_match, RevAcc, Remainder} ->
+	    report_no_match(Enc, RevAcc, Remainder)
+    end.
 
 %% Longest match applied to string (list of chars)
 
 %% NB: one/2 does not reset the line count (that would restart the count
 %%  at every token); call no_lines() before lexing a new input.
 
-longest_string({lex, Start, AcceptLimit, Table, Actions}, String) 
+longest_string({lex, Start, AcceptLimit, Table, Actions, _Enc}, String) 
   when is_list(String) -> 
     longest_string(Start, Table, AcceptLimit, Actions, String);
 longest_string(_LEX, String) ->
@@ -409,16 +430,36 @@ o_with(Regexp_rules, String) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 regexps_to_table(Regexp_rules0) ->
-    Regexp_rules = regexps_to_internal(Regexp_rules0),
+    regexps_to_table(Regexp_rules0, []).
+
+%% Options:
+%%   {encoding, Enc}  how regexps and input are interpreted, one of
+%%     bytes   (default) legacy: regexp chars are bytes; a non-ASCII
+%%             literal in the regexp is matched as its UTF-8 bytes
+%%     latin1  code points 0..255, one byte each
+%%     utf8
+%%     utf16be | utf16le | {utf16, big | little}  (utf16 = big endian)
+%%     utf32be | utf32le | {utf32, big | little}  (utf32 = big endian)
+%%
+%% In every encoding except 'bytes', the regexp is read as a string of
+%% code points and may use named Unicode classes (\\p{...}, \\P{...};
+%% see lex_unicode:property/1) and \\x{HHHHHH}. Each character or class
+%% is compiled into the byte sequences that encode it, so the lexer
+%% still runs one byte at a time but only accepts well-formed input.
+
+regexps_to_table(Regexp_rules0, Opts) ->
+    Enc = lex_unicode:normalize_encoding(
+	    proplists:get_value(encoding, Opts, bytes)),
+    Regexp_rules = regexps_to_internal(Regexp_rules0, Enc),
     NFA = regexps_to_nfa(Regexp_rules),
-    DFA = nfa_to_dfa(NFA),
-    Lex_table = dfa_to_table(DFA, Regexp_rules),
+    DFA = minimize_dfa(nfa_to_dfa(NFA)),
+    Lex_table = dfa_to_table(DFA, Regexp_rules, Enc),
     Lex_table.
 
 %% Convert all regexp rules to internal form
 
-regexps_to_internal(Regexp_rules0) ->
-    [ regexp_to_internal(N, Rule)
+regexps_to_internal(Regexp_rules0, Enc) ->
+    [ regexp_to_internal(N, Rule, Enc)
       || {N, Rule} <- lists:zip(lists:seq(1,length(Regexp_rules0)), Regexp_rules0) ].
 
 %% Convert a single regexp rule to internal form. We permit two different
@@ -429,16 +470,16 @@ regexps_to_internal(Regexp_rules0) ->
 %% - 'regexp2' isn't very nice either
 %%   * should we warn about either format?
 
-regexp_to_internal(N, {regexp, Regexp_str, Action}) ->
+regexp_to_internal(N, {regexp, Regexp_str, Action}, Enc) ->
     Prio = 0,
-    {regexp, N, parse_regexp(Regexp_str), Action, Prio};
-regexp_to_internal(N, {regexp, Prio, Regexp_str, Action}) 
+    {regexp, N, parse_regexp(Regexp_str, Enc), Action, Prio};
+regexp_to_internal(N, {regexp, Prio, Regexp_str, Action}, Enc) 
   when is_integer(Prio), Prio >= 0 ->
-    {regexp, N, parse_regexp(Regexp_str), Action, Prio};
-regexp_to_internal(N, {regexp2, Regexp_str, Action}) ->
+    {regexp, N, parse_regexp(Regexp_str, Enc), Action, Prio};
+regexp_to_internal(N, {regexp2, Regexp_str, Action}, _Enc) ->
     Prio = 0,
     {regexp, N, parse_regexp2(Regexp_str), Action, Prio};
-regexp_to_internal(N, {regexp2, Prio, Regexp_str, Action}) 
+regexp_to_internal(N, {regexp2, Prio, Regexp_str, Action}, _Enc) 
   when is_integer(Prio), Prio >= 0 ->
     {regexp, N, parse_regexp2(Regexp_str), Action, Prio}.
     
@@ -467,11 +508,21 @@ regexp_to_internal(N, {regexp2, Prio, Regexp_str, Action})
 %% eos                   "end of string", $
 
 parse_regexp(Regexp) ->
+    parse_regexp(Regexp, bytes).
+
+parse_regexp(Regexp, bytes) ->
     case regexp_parse:string(Regexp) of
   	{ok, RE} ->
   	    internal_form(RE);
   	Err ->
   	    exit(Err)
+    end;
+parse_regexp(Regexp, Enc) ->
+    case regexp_parse:string(Regexp, unicode) of
+  	{ok, RE} ->
+  	    unicode_form(Enc, RE);
+  	{error, Err} ->
+  	    exit({regexp_error, Err, Regexp})
     end.
 
 parse_regexp2(Regexp) ->
@@ -513,6 +564,55 @@ internal_form({pclosure, RE}) ->
     {seq, [RegExp, {iter, RegExp}]};
 internal_form(Other) ->
     exit({regexp_not_handled, Other}).
+
+%% Unicode version of internal_form/1: characters and classes are first
+%% sets of code points, then lowered to byte-level regexps for Enc
+%% (see lex_unicode:to_regexp/2). The result uses the same syntax tree
+%% as internal_form/1, so the NFA/DFA construction is unchanged.
+
+unicode_form(Enc, {kclosure, RE}) ->
+    {iter, unicode_form(Enc, RE)};
+unicode_form(Enc, {'or', RE1, RE2}) ->
+    flatten_disj([unicode_form(Enc, RE1), unicode_form(Enc, RE2)]);
+unicode_form(Enc, {optional, RE}) ->
+    {disj, [{seq, ""}, unicode_form(Enc, RE)]};
+unicode_form(Enc, {concat, RE1, RE2}) ->
+    flatten_seq([unicode_form(Enc, RE1), unicode_form(Enc, RE2)]);
+unicode_form(Enc, {pclosure, RE}) ->
+    RegExp = unicode_form(Enc, RE),
+    {seq, [RegExp, {iter, RegExp}]};
+unicode_form(Enc, {char_class, Elems}) ->
+    lex_unicode:to_regexp(Enc, class_set(Elems));
+unicode_form(Enc, {comp_class, Elems}) ->
+    lex_unicode:to_regexp(Enc, lex_unicode:complement(class_set(Elems)));
+unicode_form(Enc, {prop, _Neg, _Name} = Prop) ->
+    lex_unicode:to_regexp(Enc, class_set([Prop]));
+unicode_form(Enc, C) when is_integer(C) ->
+    case lex_unicode:byte_seqs(Enc, [{C, C}]) of
+	[] -> exit({unencodable_char, C, Enc});
+	_ -> lex_unicode:to_regexp(Enc, [{C, C}])
+    end;
+unicode_form(_Enc, Other) ->
+    exit({regexp_not_handled, Other}).
+
+%% The code point set of a class: chars, {From, To} and {prop, Neg, Name}
+
+class_set(Elems) ->
+    lex_unicode:normalize(lists:append([ elem_set(E) || E <- Elems ])).
+
+elem_set(C) when is_integer(C) ->
+    [{C, C}];
+elem_set({From, To}) when is_integer(From), is_integer(To) ->
+    [{From, To}];
+elem_set({prop, Neg, Name}) ->
+    case lex_unicode:property(Name) of
+	{ok, Set} when Neg ->
+	    lex_unicode:complement(Set);
+	{ok, Set} ->
+	    Set;
+	{error, Reason} ->
+	    exit(Reason)
+    end.
 
 internal_range({From, To}) 
   when is_integer(From), is_integer(To), From =< To ->
@@ -752,14 +852,28 @@ nfa_to_dfa(NFA) ->
 %%
 %% return {MergedStateName, Done_states}
 
+%%
+%% The epsilon closure is expensive for big NFAs (Unicode classes), so
+%% the name is also cached under the (sorted) set States0 itself.
+
 merge_nfa_states(States0, NFA, Done0) ->
+    Raw = {raw, lists:usort(States0)},
+    case states_present(Raw, Done0) of
+	{found, Name} ->
+	    {Name, Done0};
+	not_found ->
+	    merge_nfa_closure(Raw, States0, NFA, Done0)
+    end.
+
+merge_nfa_closure(Raw, States0, NFA, Done0) ->
     States = epsilon_reachable_all(States0, NFA),
     %% io:format("merged states = ~w~n", [States]),
     case states_present(States, Done0) of
 	{found, Name} ->
-	    {Name, Done0};
+	    {Name, alias_dfa_state(Raw, Name, Done0)};
 	not_found ->
-	    {DFA_name, Done1} = name_dfa_state(States, Done0),
+	    {DFA_name, Done1a} = name_dfa_state(States, Done0),
+	    Done1 = alias_dfa_state(Raw, DFA_name, Done1a),
 	    {state, Acc, Succs} = merge_epsilon_reachable_states(States, NFA),
 	    {NewSuccs, Done2} = merge_nfa_succ_list(Succs, NFA, Done1),
 	    {DFA_name, 
@@ -1067,6 +1181,80 @@ epsilon_reach_all(States, FA, Seen) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
+%% Minimizing the DFA (Dragon book 1st ed, section 3.9, algorithm 3.6)
+%%
+%% Partition the states, initially by acceptance (non-accepting, or
+%% accepting a given rule), then repeatedly split each group by which
+%% groups its transitions lead to, until no group splits. Each group
+%% becomes one state. Missing transitions (no match) count as a
+%% transition to the same implicit dead state.
+%%
+%% This matters for Unicode: the subset construction leaves many
+%% equivalent states, in particular for the little-endian encodings,
+%% where the low byte comes first.
+
+minimize_dfa(DFA) ->
+    IDs = states_of(DFA),
+    States = maps:from_list([ {ID, state(ID, DFA)} || ID <- IDs ]),
+    {Block0, N0} = number_blocks([ {ID, Acc} || ID <- IDs,
+						{state, Acc, _} <- [maps:get(ID, States)] ]),
+    {Block, N} = refine_blocks(IDs, States, Block0, N0),
+    Reps = maps:from_list([ {B, ID} || ID <- lists:reverse(IDs),
+				       B <- [maps:get(ID, Block)] ]),
+    FA = lists:foldl(
+	   fun(B, FA0) ->
+		   {state, Acc, Succs} = maps:get(maps:get(B, Reps), States),
+		   NewSuccs = [ {range, F, T, NB}
+				|| {F, T, NB} <- block_signature(Succs, Block) ],
+		   set_state(B, {state, Acc, NewSuccs}, FA0)
+	   end,
+	   empty_fa(),
+	   lists:seq(1, N)),
+    ?log("DFA states: ~w, minimized: ~w~n", [length(IDs), N]),
+    set_next_id(N+1, set_start_state(maps:get(start_state(DFA), Block), FA)).
+
+refine_blocks(IDs, States, Block, N) ->
+    Keys = [ {ID, {maps:get(ID, Block), block_signature(Succs, Block)}}
+	     || ID <- IDs, {state, _Acc, Succs} <- [maps:get(ID, States)] ],
+    case number_blocks(Keys) of
+	{_NewBlock, N} ->
+	    {Block, N};
+	{NewBlock, NewN} ->
+	    refine_blocks(IDs, States, NewBlock, NewN)
+    end.
+
+%% [{ID, Key}] -> {#{ID => BlockNo}, NumBlocks}, blocks numbered from 1
+%% in order of first appearance
+
+number_blocks(Keys) ->
+    {Block, _Seen, N} =
+	lists:foldl(
+	  fun({ID, Key}, {Bl, Seen, K}) ->
+		  case Seen of
+		      #{Key := B} -> {Bl#{ID => B}, Seen, K};
+		      _ -> {Bl#{ID => K+1}, Seen#{Key => K+1}, K+1}
+		  end
+	  end,
+	  {#{}, #{}, 0},
+	  Keys),
+    {Block, N}.
+
+%% The transitions of a state in terms of blocks: sorted, with adjacent
+%% ranges to the same block merged.
+
+block_signature(Succs, Block) ->
+    merge_block_ranges(
+      lists:sort([ {F, T, maps:get(Nxt, Block)} || {range, F, T, Nxt} <- Succs ])).
+
+merge_block_ranges([{F1, T1, B}, {F2, T2, B} | Rs]) when F2 == T1+1 ->
+    merge_block_ranges([{F1, T2, B} | Rs]);
+merge_block_ranges([R | Rs]) ->
+    [R | merge_block_ranges(Rs)];
+merge_block_ranges([]) ->
+    [].
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
 %% Converting a DFA to a suitable table + using the table for parsing.
 %%
 %% The code must do two things:
@@ -1090,15 +1278,18 @@ epsilon_reach_all(States, FA, Seen) ->
 %% - generate an ets-table (?)
 
 dfa_to_table(DFA, Regexp_rules) ->
+    dfa_to_table(DFA, Regexp_rules, bytes).
+
+dfa_to_table(DFA, Regexp_rules, Enc) ->
     {AcceptLimit, NewDFA} = group_accepting_states(DFA),
     ?log("~p accepting states~n", [AcceptLimit]),
-    Actions = action_table(Regexp_rules, NewDFA, AcceptLimit),
-    generate_code(NewDFA, AcceptLimit, Actions).
+    Actions = action_table(Regexp_rules, NewDFA, AcceptLimit, Enc),
+    generate_code(NewDFA, AcceptLimit, Actions, Enc).
 
-generate_code(DFA, AcceptLimit, Actions) ->
+generate_code(DFA, AcceptLimit, Actions, Enc) ->
     Table = generate_table(DFA),
     Start = start_state(DFA),
-    {lex, Start, AcceptLimit, Table, Actions}.
+    {lex, Start, AcceptLimit, Table, Actions, Enc}.
 
 %% The table is a tuple of one row/element per state
 %%
@@ -1243,12 +1434,16 @@ rename_state(_X, [], Map) ->
 %%
 %% A sequence is a string (list of char) or a binary
 
-o_longest(Lex, Seq) when is_list(Seq) ->
-    o_longest_string(Lex, Seq).
+o_longest(Lex = {lex, _, _, _, _, Enc}, Seq) when is_list(Seq) ->
+    try o_longest_string(Lex, Seq)
+    catch
+	throw:{?MODULE, no_match, RevAcc, Remainder} ->
+	    report_no_match(Enc, RevAcc, Remainder)
+    end.
 
 %% Longest match applied to string (list of chars)
 
-o_longest_string({lex, Start, AcceptLimit, Table, Actions}, String) 
+o_longest_string({lex, Start, AcceptLimit, Table, Actions, _Enc}, String) 
   when is_list(String) -> 
     no_lines(),
     o_longest_string(Start, Table, AcceptLimit, Actions, String).
@@ -1395,8 +1590,14 @@ o_post_accept("", _Acc, AccSt, _State, _Nxt, Table,
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-next_state(Char, Trans_table) ->
-    element(Char, Trans_table).
+%% Anything that is not a byte (e.g., a code point > 255 in a list) can
+%% never match; it is reported by report_no_match/3.
+
+next_state(Char, Trans_table)
+  when is_integer(Char), Char >= ?min_char, Char =< ?max_char ->
+    element(Char+1, Trans_table);
+next_state(_Char, _Trans_table) ->
+    ?no_match.
 
 %%
 
@@ -1440,16 +1641,62 @@ reset_match({match, State, Acc, Cs}) ->
 %%
 %% NB: Should also return line+column numbers if available.
 
+%% The drivers throw, and the entry points (one/2, o_longest/2) know the
+%% encoding and turn the throw into an exit via report_no_match/3.
+
 no_match(RevAcc, Remainder) ->
-    RemLine = lists:takewhile(fun(C) when C == $\n ->
-				      false;
-				 (_) ->
-				      true
-			      end, Remainder),
+    throw({?MODULE, no_match, RevAcc, Remainder}).
+
+%% Bytes mode: as before.
+%%
+%% Other encodings: first check if the failure is due to malformed
+%% input. The token started at a character boundary, so we decode from
+%% there; if a malformed sequence starts at or before the byte where
+%% the DFA failed, the input is at fault:
+%%
+%%   exit({lex_bad_encoding, Enc, Kind, {line, L},
+%%         {accumulated, CodePoints}, {bytes, BadBytes}})
+%%
+%%   Kind = invalid      malformed sequence (overlong UTF-8, unpaired
+%%                       surrogate, code point > 10FFFF, ...)
+%%        | incomplete   the input ends in the middle of a character
+%%        | not_a_byte   the input list holds something other than 0..255
+%%   CodePoints = the characters of the token before the bad sequence
+%%
+%% Otherwise no rule matched well-formed input, and we exit with
+%% lex_no_match as in bytes mode, but with code points rather than bytes.
+
+report_no_match(bytes, RevAcc, Remainder) ->
     exit({lex_no_match, 
 	  {line, current_line()},
 	  {accumulated, lists:reverse(RevAcc)}, 
-	  {remainder, RemLine}}).
+	  {remainder, rem_line(Remainder)}});
+report_no_match(Enc, RevAcc, Remainder) ->
+    Acc = lists:reverse(RevAcc),
+    Bytes = Acc ++ Remainder,
+    case lex_unicode:first_error(Enc, Bytes, length(Acc)) of
+	{Kind, Offset, Bad} ->
+	    {Good, _} = lex_unicode:decode_prefix(Enc, lists:sublist(Bytes, Offset)),
+	    exit({lex_bad_encoding, Enc, Kind,
+		  {line, current_line()},
+		  {accumulated, Good},
+		  {bytes, Bad}});
+	none ->
+	    {AccChars, Partial} = lex_unicode:decode_prefix(Enc, Acc),
+	    {RemChars, _} =
+		lex_unicode:decode_prefix(Enc, lists:sublist(Partial ++ Remainder, 320)),
+	    exit({lex_no_match, 
+		  {line, current_line()},
+		  {accumulated, AccChars}, 
+		  {remainder, rem_line(RemChars)}})
+    end.
+
+rem_line(Remainder) ->
+    lists:takewhile(fun(C) when C == $\n ->
+			    false;
+		       (_) ->
+			    true
+		    end, Remainder).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -1500,15 +1747,28 @@ curr_char(Bin, PrevPos) ->
 %%
 %% We map (AccStateID -> Action)
 
-action_table(Regexp_rules, DFA, AcceptLimit) ->
-    Acts0 = regexp_actions(Regexp_rules),
+action_table(Regexp_rules, DFA, AcceptLimit, Enc) ->
+    Acts0 = regexp_actions(Regexp_rules, Enc),
     state_actions(AcceptLimit, DFA, Acts0).
 
-regexp_actions(Regexp_rules) ->
+regexp_actions(Regexp_rules, Enc) ->
     dict:from_list(
-      [ {ID, the_action(Action)} 
+      [ {ID, decoding_action(Enc, the_action(Action))} 
 	|| {regexp, ID, _Regexp_str, Action, _Prio} <- Regexp_rules ]
      ).
+
+%% In the multibyte encodings, the driver accumulates bytes but the
+%% action gets the token as a reversed list of code points, just like
+%% a reversed string in bytes/latin1 mode. A token is always
+%% well-formed (the DFA only accepts complete, valid sequences).
+
+decoding_action(Enc, Action) when Enc == bytes; Enc == latin1 ->
+    Action;
+decoding_action(Enc, Action) ->
+    fun(RevBytes) ->
+	    {Chars, []} = lex_unicode:decode_prefix(Enc, lists:reverse(RevBytes)),
+	    Action(lists:reverse(Chars))
+    end.
 
 %% for accepting states (1..AcceptLimit), get the corresponding Action
 %%
@@ -1528,7 +1788,7 @@ the_action(Fun) when is_function(Fun) ->
     Fun;
 the_action(A) ->
     fun(Acc) ->
-	    io:format("rule ~w: ~s~n", [A, lists:reverse(Acc)]),
+	    io:format("rule ~w: ~ts~n", [A, lists:reverse(Acc)]),
 	    no_token
     end.
 
@@ -1751,19 +2011,22 @@ fa_from_list(FA) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
 %% ADT for handling what states have been visited already
-%% - using a list is suboptimal ...
+%%
+%% A map, since Unicode classes give epsilon closures of thousands of
+%% states. seen_list/1 returns a sorted list, so that the same set of
+%% NFA states always gets the same name (= the same DFA state).
 
 none_seen() ->
-    [].
+    #{}.
 
 seen(X, Xs) ->
-    lists:member(X, Xs).
+    is_map_key(X, Xs).
 
 see(X, Xs) ->
-    [X|Xs].
+    Xs#{X => true}.
 
 seen_list(Xs) ->
-    Xs.
+    lists:sort(maps:keys(Xs)).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -1797,6 +2060,9 @@ empty_pre_dfa() ->
 
 name_dfa_state(StateSet, {Next, State_names, DFA_states}) ->
     {Next, {Next+1, dict:store(StateSet, Next, State_names), DFA_states}}.
+
+alias_dfa_state(Key, Name, {Next, State_names, DFA_states}) ->
+    {Next, dict:store(Key, Name, State_names), DFA_states}.
 
 states_present(StateSet, {_Next, State_names, _DFA_states}) ->
     case dict:find(StateSet, State_names) of

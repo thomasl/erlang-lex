@@ -12,7 +12,9 @@ according to regexp rules.
 
 ````erlang
   lex:with([Regexp_rule], Sequence) -> [Token]
-    %% Regexp_rule is same as for regexps_to_table/2
+    %% Regexp_rule is same as for regexps_to_table/1
+  lex:with([Regexp_rule], Sequence, Options) -> [Token]
+    %% Options as for regexps_to_table/2, e.g. [{encoding, utf8}]
   lex:file_with([Regexp_rule], File) -> [Token]
     %% As above but lexes a whole file.
 ````
@@ -54,6 +56,8 @@ This is approximately as complex as a programming language lexer gets.
 ````erlang
   regexps_to_table([{regexp, [Prio,] Regexp_string, Action [,Prio]}]) -> 
                    Lex_table
+  regexps_to_table(Rules, Options) -> Lex_table
+    %% Options: [{encoding, Enc}], see UNICODE below
     %% where Action(AccToken) -> {token, Token} | no_token
     %%      Regexp_string is a regexp according to the regexp module
     %%      Prio is an integer rule priority (default: 0)
@@ -63,7 +67,8 @@ This is approximately as complex as a programming language lexer gets.
    regexps_to_nfa([{regexp, Regexp_string, Action}]) -> NFA
     %% where Action(AccToken) -> {token, Token} | no_token
   nfa_to_dfa(NFA) -> DFA
-  dfa_to_table(DFA) -> Lex_table
+  minimize_dfa(DFA) -> DFA
+  dfa_to_table(DFA, Rules) -> Lex_table
 ````
 
 See also below for help in specifying your lexers.
@@ -71,7 +76,8 @@ See also below for help in specifying your lexers.
 1. Specify (regexp -> action) rules
 2. Translate regexp -> NFA
 3. Translate NFA -> DFA (+ check for uniqueness)
-4. Generate table representing DFA
+4. Minimize the DFA
+5. Generate table representing DFA
 
 This code is a simple subset of lex/flex. When there are two matching tokens,
 the longest is always chosen. (I.e., if you are in an accepting state and
@@ -136,6 +142,92 @@ It is up to you to return tokens suitable for yecc, but as you can see
 it's not too hard. Line numbers can be added using the library above.
 See also the example lexer specifications in `src/lex.erl`.
 
+## UNICODE
+
+By default (`{encoding, bytes}`) the lexer works as it always has: the
+regexps and the input are bytes. Pass an encoding to lex Unicode text:
+
+````erlang
+  Rules = [{regexp, "\\p{XID_Start}\\p{XID_Continue}*", lex:item(ident)},
+           {regexp, "\\d+", lex:item(num)},
+           {regexp, "\\s+", lex:whitespace()}],
+  lex:with(Rules, <<"λx 42 中文"/utf8>>, [{encoding, utf8}])
+  %% => [{ident,1,"λx"},{num,1,"42"},{ident,1,"中文"}]
+````
+
+Encodings:
+
+| option | meaning |
+|---|---|
+| `bytes` | default, legacy: regexps and input are bytes |
+| `latin1` | code points 0..255, one byte each |
+| `utf8` | UTF-8 (RFC 3629) |
+| `utf16be`, `utf16le` | UTF-16; also `{utf16, big \| little}`, and `utf16` = big endian |
+| `utf32be`, `utf32le` | UTF-32; also `{utf32, big \| little}`, and `utf32` = big endian |
+
+In all encodings except `bytes`, a regexp is a string of code points
+(an ordinary Erlang string, or a UTF-8 binary) and may use:
+
+- `\x{HHHHHH}` for any code point up to `10FFFF`
+- named classes in Perl syntax, alone or inside `[...]`:
+  - `\p{L}`, `\pL`, `\p{Letter}`, `\p{Lu}`, `\p{gc=Lu}`,
+    `\p{General_Category=Uppercase_Letter}`, `\p{L&}` (general category)
+  - `\p{Greek}`, `\p{Grek}` (Script_Extensions, as in Perl),
+    `\p{sc=Greek}`, `\p{Script=Greek}` (Script), `\p{scx=Greek}`
+  - `\p{InGreek_and_Coptic}`, `\p{Block=Greek}`, `\p{blk=Greek}` (block)
+  - binary properties: `\p{White_Space}`, `\p{Alphabetic}`,
+    `\p{ID_Start}`, `\p{XID_Continue}`, `\p{Hex_Digit}`, ...,
+    and `\p{Alpha=No}` etc.
+  - `\p{Any}`, `\p{Assigned}`, `\p{ASCII}`, `\p{Word}`, `\p{Alnum}`,
+    `\p{Blank}`, `\p{XDigit}`
+  - an optional `Is` prefix (`\p{IsL}`); names match loosely (case,
+    spaces, `_` and `-` are ignored)
+  - `\P{...}` and `\p{^...}` are the complement
+- `\d`, `\s`, `\w` (and `\D`, `\S`, `\W`) mean `\p{Nd}`,
+  `\p{White_Space}` and `\p{Word}`, as in Perl. (In `bytes` mode they
+  still mean DEL, space and `w`, as before.)
+
+`.` and `[^...]` match any code point except the listed ones (`.`
+excludes newline), never a single byte of a multibyte character.
+
+The character data is generated from the Unicode Character Database
+(currently version 17.0.0) into `src/lex_unicode_data.erl`; run
+`make unicode-data UCD_VERSION=x.y.z` to regenerate it.
+
+### How it works
+
+The lexer still runs one byte at a time over the same kind of table.
+Each character or class in a regexp is first a set of code points; it is
+then lowered into a disjunction of byte-range sequences that matches
+exactly the well-formed encodings of those code points (the range
+splitting used by RE2 and Rust's regex crate). For example, `[\x{80}-\x{7FF}]`
+in UTF-8 becomes `[\xC2-\xDF][\x80-\xBF]`. After that, NFA, DFA,
+minimization and table generation are unchanged.
+
+### Input, tokens and errors
+
+The input is a binary or a list of bytes; `one/2` returns the rest of the
+input as a list of bytes. The action gets the token as a reversed list
+of code points, as in bytes mode, so `lex:item/1` and friends work as
+before.
+
+Since the table only accepts well-formed sequences, a token can never
+contain a partial or malformed character, so bad input is never
+silently accepted. When lexing fails, the driver checks whether the
+input is to blame and exits with
+
+````erlang
+  {lex_bad_encoding, Enc, Kind, {line, L}, {accumulated, Chars}, {bytes, Bytes}}
+````
+
+where `Kind` is `invalid` (overlong UTF-8, encoded or unpaired
+surrogate, code point above `10FFFF`, stray byte, ...), `incomplete`
+(the input ends in the middle of a character) or `not_a_byte` (a list
+element is not 0..255, e.g. an Erlang string passed instead of its
+encoding). `Chars` is the part of the current token before the bad
+`Bytes`. If the input is well-formed but no rule matches, the error is
+`{lex_no_match, ...}` as before, with code points instead of bytes.
+
 ## STATUS
 
 No known bugs per se, but some questionable design decisions.
@@ -143,12 +235,10 @@ No known bugs per se, but some questionable design decisions.
 The error returned when there is no match is incomprehensible. This is
 probably the main usage issue.
 
-Some missing functionality for more modern languages. In particular,
-UTF-8 and suchlike is not handled. The current way of lexing is not
-suitable for this -- we currently emit the equivalent of arrays for
-representing DFA transition tables, which is impractical for huge
-character sets. (The code also assumes byte values rather than wider
-characters, so this would need substantial cleanup.)
+Unicode (UTF-8, UTF-16, UTF-32) is handled by compiling characters to
+byte sequences, see UNICODE above, so the transition table stays 256
+entries wide. Little-endian encodings give bigger tables, since the DFA
+must remember the low byte while it reads the high byte.
 
 See `src/lex.erl` for some further notes on what could be done better.
 
