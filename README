@@ -1,33 +1,59 @@
-Simple table-driven lexer in Erlang.
+Erlang-Lex: a table-driven lexer generator in Erlang.
 
-Works by building an NFA given the rules, then converting the NFA
-into a DFA. If multiple rules can match, a priority can be specified.
-Ambiguous matches yield compile-time errors.
+Give it a list of rules (regular expression -> action); it builds a
+DFA at run time (regexp -> NFA -> DFA -> minimized DFA -> table, as in
+the Dragon book) and splits input into tokens by longest match, like
+Unix lex/flex. If several rules match the same longest token, the rule
+with the highest priority wins, then the earliest rule.
 
-Note that DYNAMICALLY building the lexing table is normally 'fast
-enough' for most uses. Use 'lex:with(LexSpec, String)'.
+  1> lex:with([{regexp, "\\p{L}+", lex:item(word)},
+               {regexp, "\\s+", lex:whitespace()}],
+              <<"Grüße мир"/utf8>>, [{encoding, utf8}]).
+  [{word,1,"Grüße"},{word,1,"мир"}]
 
-TODO:
+Features:
+- input as bytes, Latin-1, UTF-8, UTF-16 LE/BE or UTF-32 LE/BE; the
+  lexer reads one byte at a time and rejects malformed or truncated
+  input with a precise error
+- named Unicode classes in Perl syntax (\p{L}, \p{Greek}, \p{sc=Grek},
+  \p{InCyrillic}, \p{XID_Start}, \P{...}), \d \s \w, \x{1F600}
+- POSIX classes ([[:alpha:]], [[:^digit:]])
+- case-insensitive matching ((?i), (?i:...), option case_insensitive)
+- Unicode 17.0.0 data, regenerated from the UCD with `make unicode-data`
+
+Build and test:
+
+  make
+  make test
+
+Documentation:
+- doc/README.md   API, usage, examples, how it works, references,
+                  limitations and future work
+- doc/syntax.md   the rule and regular expression syntax
+- src/lex_examples.erl  the documented examples (tested)
+
+Building the table dynamically is fast enough for most uses (a few
+milliseconds for a programming language lexer); use
+lex:with(Rules, Input) or keep the result of lex:regexps_to_table/2.
+
+TODO (see doc/README.md, "Limitations and future work", for more):
 - refactor [lex gen; lex driver; lex codegen; tokenization library]
-- improve regexp syntax, including character classes
-  * currently need lots of escaping, nasty
 - improved error checking
   * better messages on overlapping matches
 - improved matching
   * current default is to fail on no match, but tools like lex/flex instead
     emit/skip the current char as a default and continue
-- support for lexing on binaries
-  * accepted as input, but converted to a list of bytes
-- support for incremental lexing 
+- lexing directly on binaries (now converted to a list of bytes)
+- support for incremental lexing
   (basically return 'current state' and allow resume later)
-- Unicode: done for UTF-8, UTF-16 and UTF-32, see doc/README.md
-  * also done: POSIX [:alpha:] classes, case-insensitive matching
-  * possible: multi-character case folding (ß ~ ss), normalization
+- Unicode: normalization (canonical equivalence), grapheme clusters,
+  full (multi-character) case folding, more properties, set operations
+  in classes
 - code generation
   * emit a table as a constant data structure, and the lex driver with it,
     and a suitable API
   * maybe: emit leex-style full code for the lexer using the table
     - worth checking which is faster and smaller
-  * note: for UTF-8, the table will usually be very sparse and leex-style
-    explicit code may be required
-
+  * note: for Unicode, the table can be large (in particular for the
+    little-endian encodings); byte equivalence classes or leex-style
+    code may help

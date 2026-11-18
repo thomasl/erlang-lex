@@ -345,7 +345,9 @@ ascii_case_closure(Set0) ->
 %% scalar values in Set. Surrogates and code points that the encoding
 %% cannot represent are dropped.
 %%
-%% The central step is split/4 (after Russ Cox, "UTF-8 ranges" in RE2):
+%% The central step is split/4, the UTF-8 range splitting of RE2
+%% (re2/compile.cc) and of Rust's regex-syntax crate (module utf8),
+%% generalized to N digits of Bits bits:
 %% a range Lo..Hi of N-digit numbers in base 2^Bits is split into
 %% subranges such that each digit position varies independently, i.e.
 %% each subrange is a product of digit ranges. UTF-8 uses 6-bit digits
