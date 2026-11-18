@@ -98,7 +98,8 @@
 	 nfa_to_dfa/1,
 	 minimize_dfa/1,
 	 dfa_to_table/2,
-	 dfa_to_table/3
+	 dfa_to_table/3,
+	 dfa_to_table/4
 	]).
 
 %% library functions for using the generated lexer
@@ -142,7 +143,10 @@
 	 inc_lines/0,
 	 inc_lines/1,
 	 current_line/0,
-	 count_lines/1
+	 current_column/0,
+	 current_position/0,
+	 count_lines/1,
+	 count_lines/2
 	]).
 
 %% ?max_char is currently used to decide the "charset size"
@@ -157,6 +161,11 @@
 %% Rows are tuples, so next_state/2 indexes with Char+1.
 
 -define(min_char, 0).
+
+%% process dictionary key for the current position, see
+%% "Line and column counting"
+
+-define(pos_key, lex_position).
 
 %% ?no_match is a reserved state indicating error/no match possible
 %%
@@ -261,11 +270,11 @@ lex_string(LEX, Str, Acc) ->
 
 one(LEX, Bin) when is_binary(Bin) ->
     one(LEX, binary_to_list(Bin));
-one(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc}, String) ->
+one(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, String) ->
     try longest_string(LEX, String)
     catch
 	throw:{?MODULE, no_match, RevAcc, Remainder} ->
-	    report_no_match(Enc, RevAcc, Remainder)
+	    report_no_match(Enc, NL, RevAcc, Remainder)
     end.
 
 %% Longest match applied to string (list of chars)
@@ -273,7 +282,7 @@ one(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc}, String) ->
 %% NB: one/2 does not reset the line count (that would restart the count
 %%  at every token); call no_lines() before lexing a new input.
 
-longest_string({lex, Start, AcceptLimit, Table, Actions, _Enc}, String) 
+longest_string({lex, Start, AcceptLimit, Table, Actions, _Enc, _NL}, String) 
   when is_list(String) -> 
     longest_string(Start, Table, AcceptLimit, Actions, String);
 longest_string(_LEX, String) ->
@@ -447,6 +456,13 @@ regexps_to_table(Regexp_rules0) ->
 %%     all rules are case-insensitive, as if they started with (?i);
 %%     (?-i) and (?-i:...) still switch it off
 %%
+%%   {newline, NL}  which characters end a line, for line and column
+%%     counting (see "Line and column counting" below):
+%%     unicode  LF, VT, FF, CR, CR LF, NEL, LS, PS (UTS #18 RL1.6);
+%%              the default, except in bytes mode
+%%     ascii    LF, VT, FF, CR, CR LF; the default in bytes mode
+%%     lf       LF only (as lex did before)
+%%
 %% In every encoding except 'bytes', the regexp is read as a string of
 %% code points and may use named Unicode classes (\\p{...}, \\P{...};
 %% see lex_unicode:property/1) and \\x{HHHHHH}. Each character or class
@@ -457,11 +473,21 @@ regexps_to_table(Regexp_rules0, Opts) ->
     Enc = lex_unicode:normalize_encoding(
 	    proplists:get_value(encoding, Opts, bytes)),
     Fold = proplists:get_bool(case_insensitive, Opts),
+    NL = newline_option(Enc, proplists:get_value(newline, Opts, default)),
     Regexp_rules = regexps_to_internal(Regexp_rules0, {Enc, Fold}),
     NFA = regexps_to_nfa(Regexp_rules),
     DFA = minimize_dfa(nfa_to_dfa(NFA)),
-    Lex_table = dfa_to_table(DFA, Regexp_rules, Enc),
+    Lex_table = dfa_to_table(DFA, Regexp_rules, Enc, NL),
     Lex_table.
+
+%% In bytes mode the input may be UTF-8, where 16#85 (NEL in Unicode)
+%% is a continuation byte, so only the ASCII terminators are allowed.
+
+newline_option(bytes, default) -> ascii;
+newline_option(_Enc, default) -> unicode;
+newline_option(bytes, unicode) -> exit({unicode_newline_needs_encoding, bytes});
+newline_option(_Enc, NL) when NL == unicode; NL == ascii; NL == lf -> NL;
+newline_option(_Enc, NL) -> exit({unknown_newline, NL}).
 
 %% Convert all regexp rules to internal form
 %%
@@ -1279,15 +1305,18 @@ dfa_to_table(DFA, Regexp_rules) ->
     dfa_to_table(DFA, Regexp_rules, bytes).
 
 dfa_to_table(DFA, Regexp_rules, Enc) ->
+    dfa_to_table(DFA, Regexp_rules, Enc, newline_option(Enc, default)).
+
+dfa_to_table(DFA, Regexp_rules, Enc, NL) ->
     {AcceptLimit, NewDFA} = group_accepting_states(DFA),
     ?log("~p accepting states~n", [AcceptLimit]),
-    Actions = action_table(Regexp_rules, NewDFA, AcceptLimit, Enc),
-    generate_code(NewDFA, AcceptLimit, Actions, Enc).
+    Actions = action_table(Regexp_rules, NewDFA, AcceptLimit, Enc, NL),
+    generate_code(NewDFA, AcceptLimit, Actions, Enc, NL).
 
-generate_code(DFA, AcceptLimit, Actions, Enc) ->
+generate_code(DFA, AcceptLimit, Actions, Enc, NL) ->
     Table = generate_table(DFA),
     Start = start_state(DFA),
-    {lex, Start, AcceptLimit, Table, Actions, Enc}.
+    {lex, Start, AcceptLimit, Table, Actions, Enc, NL}.
 
 %% The table is a tuple of one row/element per state
 %%
@@ -1432,16 +1461,16 @@ rename_state(_X, [], Map) ->
 %%
 %% A sequence is a string (list of char) or a binary
 
-o_longest(Lex = {lex, _, _, _, _, Enc}, Seq) when is_list(Seq) ->
+o_longest(Lex = {lex, _, _, _, _, Enc, NL}, Seq) when is_list(Seq) ->
     try o_longest_string(Lex, Seq)
     catch
 	throw:{?MODULE, no_match, RevAcc, Remainder} ->
-	    report_no_match(Enc, RevAcc, Remainder)
+	    report_no_match(Enc, NL, RevAcc, Remainder)
     end.
 
 %% Longest match applied to string (list of chars)
 
-o_longest_string({lex, Start, AcceptLimit, Table, Actions, _Enc}, String) 
+o_longest_string({lex, Start, AcceptLimit, Table, Actions, _Enc, _NL}, String) 
   when is_list(String) -> 
     no_lines(),
     o_longest_string(Start, Table, AcceptLimit, Actions, String).
@@ -1637,64 +1666,54 @@ reset_match({match, State, Acc, Cs}) ->
 %% Could also return a [{no_match, ...}] element, this was
 %% done previously.
 %%
-%% NB: Should also return line+column numbers if available.
+%% The error gives the line and column (see "Line and column counting").
 
 %% The drivers throw, and the entry points (one/2, o_longest/2) know the
-%% encoding and turn the throw into an exit via report_no_match/3.
+%% encoding and turn the throw into an exit via report_no_match/4.
 
 no_match(RevAcc, Remainder) ->
     throw({?MODULE, no_match, RevAcc, Remainder}).
 
-%% Bytes mode: as before.
+%% When no rule matches, the position is where the unmatched token
+%% starts, which is the current position (positions are advanced after
+%% each match):
 %%
-%% Other encodings: first check if the failure is due to malformed
-%% input. The token started at a character boundary, so we decode from
-%% there; if a malformed sequence starts at or before the byte where
-%% the DFA failed, the input is at fault:
+%%   exit({lex_no_match, {line, L}, {column, C}})
 %%
-%%   exit({lex_bad_encoding, Enc, Kind, {line, L},
-%%         {accumulated, CodePoints}, {bytes, BadBytes}})
+%% In the encodings other than bytes, we first check if the failure is
+%% due to malformed input. The token started at a character boundary,
+%% so we decode from there; if a malformed sequence starts at or before
+%% the byte where the DFA failed, the input is at fault:
+%%
+%%   exit({lex_bad_encoding, Enc, Kind, {line, L}, {column, C},
+%%         {bytes, BadBytes}})
 %%
 %%   Kind = invalid      malformed sequence (overlong UTF-8, unpaired
 %%                       surrogate, code point > 10FFFF, ...)
 %%        | incomplete   the input ends in the middle of a character
 %%        | not_a_byte   the input list holds something other than 0..255
-%%   CodePoints = the characters of the token before the bad sequence
-%%
-%% Otherwise no rule matched well-formed input, and we exit with
-%% lex_no_match as in bytes mode, but with code points rather than bytes.
+%%   L, C = the position of BadBytes
 
-report_no_match(bytes, RevAcc, Remainder) ->
-    exit({lex_no_match, 
-	  {line, current_line()},
-	  {accumulated, lists:reverse(RevAcc)}, 
-	  {remainder, rem_line(Remainder)}});
-report_no_match(Enc, RevAcc, Remainder) ->
+report_no_match(bytes, _NL, _RevAcc, _Remainder) ->
+    no_match_exit();
+report_no_match(Enc, NL, RevAcc, Remainder) ->
     Acc = lists:reverse(RevAcc),
     Bytes = Acc ++ Remainder,
     case lex_unicode:first_error(Enc, Bytes, length(Acc)) of
 	{Kind, Offset, Bad} ->
 	    {Good, _} = lex_unicode:decode_prefix(Enc, lists:sublist(Bytes, Offset)),
+	    {Line, Col, _} = advance(position(), Good, NL),
 	    exit({lex_bad_encoding, Enc, Kind,
-		  {line, current_line()},
-		  {accumulated, Good},
+		  {line, Line},
+		  {column, Col},
 		  {bytes, Bad}});
 	none ->
-	    {AccChars, Partial} = lex_unicode:decode_prefix(Enc, Acc),
-	    {RemChars, _} =
-		lex_unicode:decode_prefix(Enc, lists:sublist(Partial ++ Remainder, 320)),
-	    exit({lex_no_match, 
-		  {line, current_line()},
-		  {accumulated, AccChars}, 
-		  {remainder, rem_line(RemChars)}})
+	    no_match_exit()
     end.
 
-rem_line(Remainder) ->
-    lists:takewhile(fun(C) when C == $\n ->
-			    false;
-		       (_) ->
-			    true
-		    end, Remainder).
+no_match_exit() ->
+    {Line, Col} = current_position(),
+    exit({lex_no_match, {line, Line}, {column, Col}}).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -1745,27 +1764,38 @@ curr_char(Bin, PrevPos) ->
 %%
 %% We map (AccStateID -> Action)
 
-action_table(Regexp_rules, DFA, AcceptLimit, Enc) ->
-    Acts0 = regexp_actions(Regexp_rules, Enc),
+action_table(Regexp_rules, DFA, AcceptLimit, Enc, NL) ->
+    Acts0 = regexp_actions(Regexp_rules, Enc, NL),
     state_actions(AcceptLimit, DFA, Acts0).
 
-regexp_actions(Regexp_rules, Enc) ->
+regexp_actions(Regexp_rules, Enc, NL) ->
     dict:from_list(
-      [ {ID, decoding_action(Enc, the_action(Action))} 
+      [ {ID, position_action(Enc, NL, the_action(Action))} 
 	|| {regexp, ID, _Regexp_str, Action, _Prio} <- Regexp_rules ]
      ).
 
+%% Every match, token or not, goes through exactly one action, so the
+%% action is wrapped to keep the position up to date: the action runs
+%% with the position at the start of the token (current_line/0 etc.),
+%% then the position is advanced over the token text.
+%%
 %% In the multibyte encodings, the driver accumulates bytes but the
 %% action gets the token as a reversed list of code points, just like
 %% a reversed string in bytes/latin1 mode. A token is always
 %% well-formed (the DFA only accepts complete, valid sequences).
 
-decoding_action(Enc, Action) when Enc == bytes; Enc == latin1 ->
-    Action;
-decoding_action(Enc, Action) ->
+position_action(Enc, NL, Action) when Enc == bytes; Enc == latin1 ->
+    fun(RevChars) ->
+	    Result = Action(RevChars),
+	    put(?pos_key, advance(position(), lists:reverse(RevChars), NL)),
+	    Result
+    end;
+position_action(Enc, NL, Action) ->
     fun(RevBytes) ->
 	    {Chars, []} = lex_unicode:decode_prefix(Enc, lists:reverse(RevBytes)),
-	    Action(lists:reverse(Chars))
+	    Result = Action(lists:reverse(Chars)),
+	    put(?pos_key, advance(position(), Chars, NL)),
+	    Result
     end.
 
 %% for accepting states (1..AcceptLimit), get the corresponding Action
@@ -1808,44 +1838,95 @@ lookup_action(Actions, St) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
-%% Library ADT for keeping track of the number of lines seen.
+%% Line and column counting
 %%
-%%  usage
-%%    {regexp, "\n", fun(_) -> lex:inc_lines(), no_token end}
-%%    {regexp, "...", fun(Acc) -> lex:count_lines(Acc), no_token end}
-%%    {regexp, "<", fun(_) -> {token, {op, lex:current_line(), '<'}} end}
+%% The drivers keep the current position, {Line, Column}, both counted
+%% from 1. Each match (whether it gives a token or not) advances the
+%% position over the matched characters: a line terminator moves to
+%% column 1 of the next line, anything else to the next column. Columns
+%% count characters: code points in the Unicode encodings and latin1,
+%% bytes in bytes mode (so a tab is one column).
 %%
-%% The middle rule "..." should be read as a regexp that matches a string
-%% w. any number of actual newlines (a quoted atom in Erlang, perhaps). 
+%% While an action runs, the position is that of the start of its
+%% token, so actions can call current_line/0, current_column/0 and
+%% current_position/0. Actions do not have to count lines themselves.
 %%
-%% Prior to starting the lexer, you must reset lex_lines to 0 (or undefined),
-%% otherwise you will get the wrong number of lines. Reset is done by
-%%   lex:no_lines().
+%% Line terminators, by the newline option of regexps_to_table/2:
+%%   lf       LF
+%%   ascii    LF, VT, FF, CR, and CR LF (one line break)
+%%   unicode  as ascii, plus NEL (U+0085), LINE SEPARATOR (U+2028)
+%%            and PARAGRAPH SEPARATOR (U+2029); UTS #18 RL1.6
+%% A CR LF split over two matches is still one line break.
 %%
-%% (Perhaps the drivers should call implicitly?)
+%% The position is kept in the process dictionary. with/2,3 and
+%% o_longest/2 reset it; call no_lines() before lexing new input with
+%% one/2.
+
+%% {Line, Column, AfterCR}; AfterCR is true if the last character was a
+%% CR that ended a line, so that a following LF does not start another.
+
+position() ->
+    case get(?pos_key) of
+	undefined -> {1, 1, false};
+	Pos -> Pos
+    end.
 
 no_lines() ->
-    put(lex_lines, 1).
+    put(?pos_key, {1, 1, false}).
+
+%% Add N to the line count, e.g. for a directive that changes the line
+%% number. Ordinary line terminators are already counted by the driver,
+%% so actions should not call this for them.
 
 inc_lines() ->
     inc_lines(1).
 
 inc_lines(N) when N >= 0 ->
-    K = get(lex_lines),
-    put(lex_lines, K+N).
+    {Line, Col, CR} = position(),
+    put(?pos_key, {Line+N, Col, CR}).
 
 current_line() ->
-    get(lex_lines).
+    element(1, position()).
 
-count_lines(Str) ->
-    count_lines(Str, 0).
+current_column() ->
+    element(2, position()).
 
-count_lines("\n" ++ Cs, Acc) ->
-    count_lines(Cs, Acc+1);
-count_lines([_|Cs], Acc) ->
-    count_lines(Cs, Acc);
-count_lines("", Acc) ->
-    Acc.
+current_position() ->
+    {Line, Col, _CR} = position(),
+    {Line, Col}.
+
+%% advance({Line, Col, AfterCR}, Chars, NL) -> {Line, Col, AfterCR}
+
+advance(Pos, [], _NL) ->
+    Pos;
+advance({Line, Col, true}, [$\n | Cs], NL) ->
+    %% the LF of a CR LF
+    advance({Line, Col, false}, Cs, NL);
+advance({Line, Col, _}, [C | Cs], NL) ->
+    case is_line_terminator(C, NL) of
+	true -> advance({Line+1, 1, C == $\r}, Cs, NL);
+	false -> advance({Line, Col+1, false}, Cs, NL)
+    end.
+
+is_line_terminator($\n, _NL) -> true;
+is_line_terminator(_C, lf) -> false;
+is_line_terminator(C, _NL) when C >= $\v, C =< $\r -> true;   % VT FF CR
+is_line_terminator(_C, ascii) -> false;
+is_line_terminator(16#85, unicode) -> true;
+is_line_terminator(16#2028, unicode) -> true;
+is_line_terminator(16#2029, unicode) -> true;
+is_line_terminator(_C, unicode) -> false.
+
+%% count_lines(Chars) -> number of line breaks in Chars, by the ascii
+%% rules (LF, VT, FF, CR, CR LF), which work both for bytes and for
+%% code points. count_lines(Chars, NL) with NL = lf | ascii | unicode.
+
+count_lines(Chars) ->
+    count_lines(Chars, ascii).
+
+count_lines(Chars, NL) ->
+    {Lines, _Col, _CR} = advance({0, 1, false}, Chars, NL),
+    Lines.
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -2110,10 +2191,7 @@ op(Key) ->
 quoted_atom() ->
     fun([$'|Acc]) ->
 	    [$'|Atm] = lists:reverse(Acc),
-	    Line = lex:current_line(),
-	    N = lex:count_lines(Atm),
-	    lex:inc_lines(N),
-	    {token, {atom, Line, Atm}}
+	    {token, {atom, lex:current_line(), Atm}}
     end.
 
 %% NB: Some strings may be defined not to contain newlines
@@ -2121,10 +2199,7 @@ quoted_atom() ->
 string() ->
     fun([$"|Acc]) ->
 	    [$"|Str] = lists:reverse(Acc),
-	    Line = lex:current_line(),
-	    N = lex:count_lines(Str),
-	    lex:inc_lines(N),
-	    {token, {string, Line, Str}}
+	    {token, {string, lex:current_line(), Str}}
     end.
 
 %% recall that accumulator is reversed when passed to the action
@@ -2200,9 +2275,11 @@ whitespace() ->
 	    no_token
     end.
 
+%% Lines are counted by the driver, so this is the same as
+%% whitespace(); kept for existing specifications.
+
 newline() ->
     fun(_Acc) ->
-	    inc_lines(),
 	    no_token
     end.
 

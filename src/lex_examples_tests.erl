@@ -5,7 +5,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -import(lex_examples, [calc/1, config/1, idents/1, sql/1, utf16_file/1,
-                       scripts/1, tokens_one_by_one/1, safe_lex/1]).
+                       scripts/1, tokens_one_by_one/1, safe_lex/1, positions/1]).
 
 calc_test() ->
     ?assertEqual([{num, 1, "12"}, {'+', 1}, {'(', 1}, {num, 1, "3"}, {'*', 1},
@@ -36,7 +36,11 @@ one_by_one_test() ->
     ?assertEqual([{ident, 1, "a1"}, {ident, 1, "b2"}], tokens_one_by_one(<<"a1 b2">>)).
 
 safe_lex_test() ->
-    ?assertEqual({error, {invalid_utf8, {line, 1}, [255]}}, safe_lex(<<"ok", 16#FF>>)),
-    ?assertEqual({error, {truncated, {line, 1}, [226, 130]}}, safe_lex(<<"ok ", 16#E2, 16#82>>)),
-    ?assertEqual({error, {unexpected, {line, 1}, "?"}}, safe_lex(<<"ok ?">>)),
+    ?assertEqual({error, {invalid_utf8, {1, 3}, [255]}}, safe_lex(<<"ok", 16#FF>>)),
+    ?assertEqual({error, {truncated, {2, 3}, [226, 130]}}, safe_lex(<<"ok\nλ "/utf8, 16#E2, 16#82>>)),
+    ?assertEqual({error, {unexpected, {1, 4}}}, safe_lex(<<"ok ?">>)),
     ?assertEqual({ok, [{ident, 1, "ok"}]}, safe_lex(<<"ok">>)).
+
+positions_test() ->
+    ?assertEqual([{word, {1, 1}, "ab"}, {word, {2, 1}, "cd"}, {word, {2, 4}, "λ"}],
+                 positions(<<"ab\ncd λ"/utf8>>)).

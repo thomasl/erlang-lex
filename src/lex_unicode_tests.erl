@@ -12,7 +12,7 @@ table(Regexp, Enc) ->
     lex:regexps_to_table([{regexp, Regexp, lex:item(t)}], [{encoding, Enc}]).
 
 %% Run the DFA over Bytes; true if it ends in an accepting state.
-accepts({lex, Start, AccLim, Table, _Actions, _Enc}, Bytes) ->
+accepts({lex, Start, AccLim, Table, _Actions, _Enc, _NL}, Bytes) ->
     walk(Start, AccLim, Table, Bytes).
 
 walk(S, AccLim, _Table, []) ->
@@ -24,7 +24,7 @@ walk(S, AccLim, Table, [B | Bs]) ->
     end.
 
 %% Number of distinct byte strings accepted by an acyclic table.
-count_accepted({lex, Start, AccLim, Table, _Actions, _Enc}) ->
+count_accepted({lex, Start, AccLim, Table, _Actions, _Enc, _NL}) ->
     {N, _} = count(Start, AccLim, Table, #{}),
     N.
 
@@ -221,61 +221,70 @@ latin1_test() ->
                  lex:with(Rules, <<"caf", 16#E9, " ", 16#FF>>, [{encoding, latin1}])).
 
 no_match_test() ->
-    ?assertMatch({'EXIT', {lex_no_match, {line, 1}, {accumulated, []}, {remainder, "!λ"}}},
-                 lex(unicode:characters_to_binary("λ !λ\nzz"), utf8)).
+    ?assertEqual({'EXIT', {lex_no_match, {line, 1}, {column, 3}}},
+                 lex(unicode:characters_to_binary("λ !λ\nzz"), utf8)),
+    ?assertEqual({'EXIT', {lex_no_match, {line, 3}, {column, 4}}},
+                 lex(unicode:characters_to_binary("λ\n中文\n😀λ !"), utf8)).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Malformed input is reported, never accepted
 
-bad(Enc, Kind, Acc, Bytes) ->
-    {'EXIT', {lex_bad_encoding, Enc, Kind, {line, 1}, {accumulated, Acc}, {bytes, Bytes}}}.
+%% The position is that of the first bad byte, on line 1 unless given.
+bad(Enc, Kind, Col, Bytes) ->
+    bad(Enc, Kind, 1, Col, Bytes).
+
+bad(Enc, Kind, Line, Col, Bytes) ->
+    {'EXIT', {lex_bad_encoding, Enc, Kind, {line, Line}, {column, Col}, {bytes, Bytes}}}.
 
 utf8_errors_test_() ->
-    [?_assertEqual(bad(utf8, invalid, [], [16#FF]), lex(<<"ab ", 16#FF, "cd">>, utf8)),
+    [?_assertEqual(bad(utf8, invalid, 4, [16#FF]), lex(<<"ab ", 16#FF, "cd">>, utf8)),
      %% overlong '/'
-     ?_assertEqual(bad(utf8, invalid, [], [16#C0]), lex(<<16#C0, 16#AF>>, utf8)),
+     ?_assertEqual(bad(utf8, invalid, 1, [16#C0]), lex(<<16#C0, 16#AF>>, utf8)),
      %% overlong 3-byte
-     ?_assertEqual(bad(utf8, invalid, [], [16#E0, 16#80]), lex(<<16#E0, 16#80, 16#80>>, utf8)),
+     ?_assertEqual(bad(utf8, invalid, 1, [16#E0, 16#80]), lex(<<16#E0, 16#80, 16#80>>, utf8)),
      %% encoded surrogate U+D800
-     ?_assertEqual(bad(utf8, invalid, [], [16#ED, 16#A0]), lex(<<16#ED, 16#A0, 16#80>>, utf8)),
+     ?_assertEqual(bad(utf8, invalid, 1, [16#ED, 16#A0]), lex(<<16#ED, 16#A0, 16#80>>, utf8)),
      %% above U+10FFFF
-     ?_assertEqual(bad(utf8, invalid, [], [16#F4, 16#90]), lex(<<16#F4, 16#90, 16#80, 16#80>>, utf8)),
+     ?_assertEqual(bad(utf8, invalid, 1, [16#F4, 16#90]), lex(<<16#F4, 16#90, 16#80, 16#80>>, utf8)),
      %% stray continuation byte after a token ...
-     ?_assertEqual(bad(utf8, invalid, [], [16#80]), lex(<<"ab", 16#80>>, utf8)),
+     ?_assertEqual(bad(utf8, invalid, 3, [16#80]), lex(<<"ab", 16#80>>, utf8)),
      %% ... and inside one
-     ?_assertEqual(bad(utf8, invalid, "\"ab", [16#80]), lex(<<"\"ab", 16#80, "\"">>, utf8)),
-     ?_assertEqual(bad(utf8, incomplete, "\"ab", [16#E2, 16#82]), lex(<<"\"ab", 16#E2, 16#82>>, utf8)),
+     ?_assertEqual(bad(utf8, invalid, 4, [16#80]), lex(<<"\"ab", 16#80, "\"">>, utf8)),
+     ?_assertEqual(bad(utf8, incomplete, 4, [16#E2, 16#82]), lex(<<"\"ab", 16#E2, 16#82>>, utf8)),
      %% truncated character at the end of the input, alone ...
-     ?_assertEqual(bad(utf8, incomplete, [], [16#CE]), lex(<<"ab ", 16#CE>>, utf8)),
+     ?_assertEqual(bad(utf8, incomplete, 4, [16#CE]), lex(<<"ab ", 16#CE>>, utf8)),
      %% ... and right after a token that could continue with it
-     ?_assertEqual(bad(utf8, incomplete, [], [16#CE]), lex(<<"ab", 16#CE>>, utf8)),
-     ?_assertEqual(bad(utf8, incomplete, [], [16#F0, 16#9F, 16#98]),
+     ?_assertEqual(bad(utf8, incomplete, 3, [16#CE]), lex(<<"ab", 16#CE>>, utf8)),
+     ?_assertEqual(bad(utf8, incomplete, 3, [16#F0, 16#9F, 16#98]),
                    lex(<<"x ", 16#F0, 16#9F, 16#98>>, utf8)),
      %% truncated, then more input: invalid, not incomplete
-     ?_assertEqual(bad(utf8, invalid, [], [16#CE, $a]), lex(<<16#CE, "a">>, utf8)),
+     ?_assertEqual(bad(utf8, invalid, 1, [16#CE, $a]), lex(<<16#CE, "a">>, utf8)),
      %% a list element that is not a byte
-     ?_assertEqual(bad(utf8, not_a_byte, [], [16#3BB]), lex([$a, 16#3BB], utf8)),
-     ?_assertEqual(bad(utf8, not_a_byte, "\"a", [16#3BB]), lex([$", $a, 16#3BB, $"], utf8))].
+     ?_assertEqual(bad(utf8, not_a_byte, 2, [16#3BB]), lex([$a, 16#3BB], utf8)),
+     ?_assertEqual(bad(utf8, not_a_byte, 3, [16#3BB]), lex([$", $a, 16#3BB, $"], utf8)),
+     %% inside a token that spans lines: the position of the bad byte
+     ?_assertEqual(bad(utf8, invalid, 3, 2, [16#FF]),
+                   lex(<<"x\n\"λ\nμ"/utf8, 16#FF, "\"">>, utf8))].
 
 utf16_errors_test_() ->
     [%% lone high surrogate followed by 'a'
-     ?_assertEqual(bad({utf16, little}, invalid, [], [16#00, 16#D8, $a, 0]),
+     ?_assertEqual(bad({utf16, little}, invalid, 1, [16#00, 16#D8, $a, 0]),
                    lex(<<16#00, 16#D8, $a, 0>>, {utf16, little})),
      %% lone low surrogate
-     ?_assertEqual(bad({utf16, big}, invalid, [], [16#DC, 16#00]),
+     ?_assertEqual(bad({utf16, big}, invalid, 2, [16#DC, 16#00]),
                    lex(<<0, $a, 16#DC, 16#00>>, {utf16, big})),
      %% odd number of bytes
-     ?_assertEqual(bad({utf16, big}, incomplete, [], [0]), lex(<<0, $a, 0, $\s, 0>>, {utf16, big})),
+     ?_assertEqual(bad({utf16, big}, incomplete, 3, [0]), lex(<<0, $a, 0, $\s, 0>>, {utf16, big})),
      %% high surrogate at the end
-     ?_assertEqual(bad({utf16, little}, incomplete, [], [16#3D, 16#D8]),
+     ?_assertEqual(bad({utf16, little}, incomplete, 3, [16#3D, 16#D8]),
                    lex(<<$a, 0, $\s, 0, 16#3D, 16#D8>>, {utf16, little}))].
 
 utf32_errors_test_() ->
-    [?_assertEqual(bad({utf32, big}, invalid, [], [0, 16#11, 0, 0]),
+    [?_assertEqual(bad({utf32, big}, invalid, 1, [0, 16#11, 0, 0]),
                    lex(<<0, 16#11, 0, 0>>, {utf32, big})),
-     ?_assertEqual(bad({utf32, little}, invalid, [], [0, 16#D8, 0, 0]),
+     ?_assertEqual(bad({utf32, little}, invalid, 1, [0, 16#D8, 0, 0]),
                    lex(<<0, 16#D8, 0, 0>>, {utf32, little})),
-     ?_assertEqual(bad({utf32, little}, incomplete, [], [$a, 0, 0]),
+     ?_assertEqual(bad({utf32, little}, incomplete, 1, [$a, 0, 0]),
                    lex(<<$a, 0, 0>>, {utf32, little}))].
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -330,21 +339,21 @@ caseless_lex_test_() ->
     [?_assertEqual([{t, 1, "SELECT"}, {t, 1, "SeLeCt"}], W("(?i)select", <<"SELECT SeLeCt">>, [])),
      ?_assertEqual([{t, 1, "SELECT"}], W("select", <<"SELECT">>, [case_insensitive])),
      ?_assertEqual([{t, 1, "SELECT"}], W("select", <<"SELECT">>, [{case_insensitive, true}])),
-     ?_assertMatch({'EXIT', {lex_no_match, _, _, _}}, W("(?-i)select", <<"SELECT">>, [case_insensitive])),
+     ?_assertMatch({'EXIT', {lex_no_match, _, _}}, W("(?-i)select", <<"SELECT">>, [case_insensitive])),
      ?_assertEqual([{t, 1, "Keep"}], W("(?i:k)eep", <<"Keep">>, [])),
-     ?_assertMatch({'EXIT', {lex_no_match, _, {accumulated, "K"}, _}}, W("(?i:k)eep", <<"KEEP">>, [])),
+     ?_assertEqual({'EXIT', {lex_no_match, {line, 1}, {column, 1}}}, W("(?i:k)eep", <<"KEEP">>, [])),
      ?_assertEqual([{t, 1, "ΣσςΣ"}], W("(?i)σ+", <<"ΣσςΣ"/utf8>>, U)),
      ?_assertEqual([{t, 1, "K"}, {t, 1, [16#212A]}], W("(?i)k", <<"K"/utf8, 16#212A/utf8>>, U)),
      ?_assertEqual([{t, 1, "ÀÉ"}], W("(?i)[à-é]+", <<"ÀÉ"/utf8>>, U)),
      ?_assertEqual([{t, 1, "a"}], W("(?i)\\p{Lu}", <<"a">>, U)),
      %% negation after folding
-     ?_assertMatch({'EXIT', {lex_no_match, _, _, _}}, W("(?i)[^a]", <<"A">>, [])),
-     ?_assertMatch({'EXIT', {lex_no_match, _, _, _}}, W("(?i)\\P{Lu}", <<"a">>, U)),
+     ?_assertMatch({'EXIT', {lex_no_match, _, _}}, W("(?i)[^a]", <<"A">>, [])),
+     ?_assertMatch({'EXIT', {lex_no_match, _, _}}, W("(?i)\\P{Lu}", <<"a">>, U)),
      %% no multi-character folds
-     ?_assertMatch({'EXIT', {lex_no_match, _, _, _}}, W("(?i)ss", <<"ß"/utf8>>, U)),
+     ?_assertMatch({'EXIT', {lex_no_match, _, _}}, W("(?i)ss", <<"ß"/utf8>>, U)),
      %% bytes mode only folds ASCII, and never splits a UTF-8 literal
      ?_assertEqual([{t, 1, [$C, $A, $F, 16#C3, 16#A9]}], W("(?i)café", <<"CAFé"/utf8>>, [])),
-     ?_assertMatch({'EXIT', {lex_no_match, _, _, _}}, W("(?i)café", <<"CAFÉ"/utf8>>, []))].
+     ?_assertMatch({'EXIT', {lex_no_match, _, _}}, W("(?i)café", <<"CAFÉ"/utf8>>, []))].
 
 flag_syntax_test_() ->
     E = fun(Re) -> caught(fun() -> table(Re, utf8) end) end,
@@ -392,3 +401,115 @@ caseless_posix_test() ->
     Lex = lex:regexps_to_table([{regexp, "[[:upper:]]+", lex:item(t)}],
                                [{encoding, utf8}, case_insensitive]),
     ?assert(accepts(Lex, "aBc")).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Line and column counting
+
+%% An action that records where its token starts
+at(Tag) ->
+    fun(Acc) -> {token, {Tag, lex:current_position(), lists:reverse(Acc)}} end.
+
+%% Words; every other character is skipped one at a time, so that line
+%% terminators (and the two halves of a CR LF) are separate matches.
+pos_rules(Enc) when Enc == bytes ->
+    [{regexp, "[a-z]+", at(w)}, {regexp, "[^a-z]", lex:whitespace()}];
+pos_rules(_Enc) ->
+    [{regexp, "\\p{L}+", at(w)}, {regexp, "\\P{L}", lex:whitespace()}].
+
+positions(Text, Opts) ->
+    Enc = proplists:get_value(encoding, Opts, bytes),
+    Bin = case Enc of
+              bytes -> list_to_binary(Text);
+              latin1 -> list_to_binary(Text);
+              _ -> unicode:characters_to_binary(Text, unicode, Enc)
+          end,
+    [ P || {w, P, _} <- lex:with(pos_rules(Enc), Bin, Opts) ].
+
+%% LF, VT, FF, CR, CR LF, NEL, LS, PS, in every Unicode encoding
+unicode_lines_test_() ->
+    Text = "a\nb\vc\fd\re\r\nf" ++ [16#85] ++ "g" ++ [16#2028] ++ "h" ++ [16#2029] ++ "i",
+    Expect = [ {L, 1} || L <- lists:seq(1, 9) ],
+    [ ?_assertEqual(Expect, positions(Text, [{encoding, Enc}])) || Enc <- ?ENCODINGS ].
+
+latin1_lines_test() ->
+    ?assertEqual([{1, 1}, {2, 1}, {3, 1}],
+                 positions("a" ++ [16#85] ++ "b\r\nc", [{encoding, latin1}])).
+
+ascii_lines_test() ->
+    %% the default in bytes mode
+    ?assertEqual([{1, 1}, {2, 1}, {3, 1}, {4, 1}, {5, 1}],
+                 positions("a\nb\rc\r\nd\fe", [])),
+    ?assertEqual([{1, 1}, {2, 1}, {2, 3}],
+                 positions("a\r\nb" ++ [16#85] ++ "c", [{encoding, utf8}, {newline, ascii}])).
+
+lf_lines_test() ->
+    ?assertEqual([{1, 1}, {1, 3}, {2, 1}, {2, 3}],
+                 positions("a\rb\nc\fd", [{newline, lf}])),
+    ?assertEqual([{1, 1}, {1, 3}],
+                 positions("a" ++ [16#2028] ++ "b", [{encoding, utf8}, {newline, lf}])).
+
+%% a CR LF is one line break, also when one match ends with the CR and
+%% the next one starts with the LF
+crlf_test() ->
+    Rules = [{regexp, "[a-z]+", at(w)}, {regexp, "[a-z]*\r", at(cr)},
+             {regexp, "\n[a-z]*", at(lf)}, {regexp, "\r\n", lex:newline()},
+             {regexp, " ", lex:whitespace()}],
+    ?assertEqual([{cr, {1, 1}, "a\r"}, {lf, {2, 1}, "\nb"}, {cr, {3, 1}, "c\r"},
+                  {lf, {4, 1}, "\nd"}, {w, {4, 3}, "e"}],
+                 lex:with(Rules, <<"a\r\nb\r\nc\r\nd e">>)).
+
+%% columns count characters, not bytes or UTF-16 code units
+columns_test_() ->
+    Text = "ab λμ 中文 😀x y",
+    Expect = [{1, 1}, {1, 4}, {1, 7}, {1, 11}, {1, 13}],
+    [ ?_assertEqual(Expect, positions(Text, [{encoding, Enc}])) || Enc <- ?ENCODINGS ].
+
+%% a tab is one column; bytes mode counts bytes
+bytes_columns_test() ->
+    ?assertEqual([{1, 1}, {1, 3}, {1, 6}], positions("a\tb  c", [])),
+    Lex = lex:regexps_to_table([{regexp, "[a-z]+", at(w)}, {regexp, "[^a-z]+", lex:whitespace()}]),
+    ?assertEqual([{w, {1, 1}, "a"}, {w, {1, 4}, "b"}],
+                 lex:o_longest(Lex, binary_to_list(<<"a", "λ"/utf8, "b">>))).
+
+%% tokens that span lines, and the helpers that used to count lines
+multiline_tokens_test() ->
+    Rules = [{regexp, "\"[^\"]*\"", lex:string()},
+             {regexp, "'[^']*'", lex:quoted_atom()},
+             {regexp, "[a-z]+", lex:item(w)},
+             {regexp, " ", lex:whitespace()},
+             {regexp, "\n", lex:newline()}],
+    ?assertEqual([{string, 1, "a\nb"}, {w, 2, "c"}, {atom, 3, "d\n\ne"},
+                  {w, 5, "f"}],
+                 lex:with(Rules, <<"\"a\nb\" c\n'd\n\ne' f">>)).
+
+%% inc_lines/1 still adds to the line count (and nothing else)
+inc_lines_test() ->
+    Rules = [{regexp, "#skip", fun(_) -> lex:inc_lines(10), no_token end},
+             {regexp, "[a-z]+", at(w)}, {regexp, " ", lex:whitespace()}],
+    ?assertEqual([{w, {1, 1}, "a"}, {w, {11, 9}, "b"}],
+                 lex:with(Rules, <<"a #skip b">>)).
+
+%% one/2 continues from the current position; no_lines/0 resets it
+one_position_test() ->
+    Lex = lex:regexps_to_table(pos_rules(utf8), [{encoding, utf8}]),
+    lex:no_lines(),
+    {token, {w, {1, 1}, "λ"}, R1} = lex:one(Lex, <<"λ\n μ"/utf8>>),
+    {token, {w, {2, 2}, "μ"}, []} = lex:one(Lex, R1),
+    ?assertEqual({2, 3}, lex:current_position()),
+    ?assertEqual(2, lex:current_line()),
+    ?assertEqual(3, lex:current_column()),
+    lex:no_lines(),
+    ?assertEqual({1, 1}, lex:current_position()).
+
+newline_option_test() ->
+    ?assertEqual({'EXIT', {unicode_newline_needs_encoding, bytes}},
+                 caught(fun() -> lex:regexps_to_table(pos_rules(bytes), [{newline, unicode}]) end)),
+    ?assertEqual({'EXIT', {unknown_newline, crlf}},
+                 caught(fun() -> lex:regexps_to_table(pos_rules(bytes), [{newline, crlf}]) end)).
+
+count_lines_test() ->
+    ?assertEqual(4, lex:count_lines("a\nb\r\nc\rd\fe")),
+    ?assertEqual(2, lex:count_lines("a\nb\r\nc\rd\fe", lf)),
+    ?assertEqual(0, lex:count_lines([$a, 16#2028, $b])),
+    ?assertEqual(2, lex:count_lines([$a, 16#2028, $b, 16#85], unicode)),
+    ?assertEqual(0, lex:count_lines("")).

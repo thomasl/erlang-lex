@@ -12,7 +12,8 @@
          utf16_file/1,
          scripts/1,
          tokens_one_by_one/1,
-         safe_lex/1]).
+         safe_lex/1,
+         positions/1]).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% 1. A calculator lexer in the default (bytes) encoding.
@@ -140,23 +141,37 @@ pull(Lex, Input, Acc) ->
     end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% 8. Handling errors.
+%% 8. Handling errors. Errors give the line and column, counted in
+%%    characters from 1.
 %%
 %%   lex_examples:safe_lex(<<"ok", 16#FF>>)
-%%   => {error, {invalid_utf8, {line, 1}, [255]}}
-%%   lex_examples:safe_lex(<<"ok ", 16#E2, 16#82>>)   % truncated "€"
-%%   => {error, {truncated, {line, 1}, [226,130]}}
+%%   => {error, {invalid_utf8, {1, 3}, [255]}}
+%%   lex_examples:safe_lex(<<"ok\nλ ", 16#E2, 16#82>>)   % truncated "€"
+%%   => {error, {truncated, {2, 3}, [226,130]}}
 %%   lex_examples:safe_lex(<<"ok ?">>)
-%%   => {error, {unexpected, {line, 1}, "?"}}
+%%   => {error, {unexpected, {1, 4}}}
 
 safe_lex(Utf8) ->
     try
         {ok, lex:with(ident_rules(), Utf8, [{encoding, utf8}])}
     catch
-        exit:{lex_bad_encoding, utf8, invalid, Line, _Acc, {bytes, Bytes}} ->
-            {error, {invalid_utf8, Line, Bytes}};
-        exit:{lex_bad_encoding, utf8, incomplete, Line, _Acc, {bytes, Bytes}} ->
-            {error, {truncated, Line, Bytes}};
-        exit:{lex_no_match, Line, _Acc, {remainder, Rest}} ->
-            {error, {unexpected, Line, Rest}}
+        exit:{lex_bad_encoding, utf8, invalid, {line, L}, {column, C}, {bytes, Bytes}} ->
+            {error, {invalid_utf8, {L, C}, Bytes}};
+        exit:{lex_bad_encoding, utf8, incomplete, {line, L}, {column, C}, {bytes, Bytes}} ->
+            {error, {truncated, {L, C}, Bytes}};
+        exit:{lex_no_match, {line, L}, {column, C}} ->
+            {error, {unexpected, {L, C}}}
     end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% 9. Tokens with their position {Line, Column}, as in doc/README.md,
+%%    "Line and column counting".
+%%
+%%   lex_examples:positions(<<"ab\ncd λ"/utf8>>)
+%%   => [{word,{1,1},"ab"},{word,{2,1},"cd"},{word,{2,4},"λ"}]
+
+positions(Utf8) ->
+    lex:with([{regexp, "\\p{L}+", at(word)}, {regexp, "\\s+", lex:whitespace()}],
+             Utf8, [{encoding, utf8}]).
+
+at(Tag) -> fun(Acc) -> {token, {Tag, lex:current_position(), lists:reverse(Acc)}} end.

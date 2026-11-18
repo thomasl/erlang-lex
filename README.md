@@ -25,6 +25,9 @@ with the highest priority wins, then the earliest rule.
   `\x{1F600}`.
 - POSIX classes (`[[:alpha:]]`, `[[:^digit:]]`).
 - Case-insensitive matching (`(?i)`, `(?i:...)`, option `case_insensitive`).
+- Line and column counting by the lexer, with the Unicode line
+  terminators (CR LF, NEL, U+2028, ...); errors report the line and
+  column.
 - Unicode 17.0.0 data, regenerated from the UCD with `make unicode-data`.
 
 ## Build and test

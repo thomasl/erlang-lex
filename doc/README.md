@@ -135,7 +135,8 @@ with(Rules, Input, Options) -> [Token]
 ```
 
 Build a table from `Rules` and lex all of `Input` (a binary or a list).
-Resets the line count to 1 first. Exits on errors (see [Errors](#errors)).
+Resets the position to line 1, column 1 first. Exits on errors (see
+[Errors](#errors)).
 
 ```erlang
 regexps_to_table(Rules) -> LexTable
@@ -148,9 +149,12 @@ Compile the rules. `Options` is a list of:
 - `case_insensitive` or `{case_insensitive, Bool}`: make all rules
   case-insensitive, as if each started with `(?i)`; default `false`
   (see [syntax.md](syntax.md#7-case-insensitive-matching))
+- `{newline, unicode | ascii | lf}`: which characters end a line, see
+  [Line and column counting](#line-and-column-counting); default
+  `unicode`, or `ascii` in the `bytes` encoding
 
 Errors in the rules exit here, see [Errors](#errors). The table is
-`{lex, Start, AcceptLimit, Table, Actions, Enc}`; treat it as opaque.
+`{lex, Start, AcceptLimit, Table, Actions, Enc, NL}`; treat it as opaque.
 
 ```erlang
 one(LexTable, Input) -> {token, Token, Rest} | end_of_stream
@@ -159,8 +163,9 @@ one(LexTable, Input) -> {token, Token, Rest} | end_of_stream
 Return the next token and the rest of the input (as a list of bytes),
 or `end_of_stream` when only skipped text (`no_token`) remains. This is
 the interface for a parser that pulls tokens one at a time
-([example 7](#7-pulling-tokens-one-at-a-time)). `one/2` does not reset
-the line count: call `no_lines()` before lexing a new input.
+([example 7](#7-pulling-tokens-one-at-a-time)). `one/2` continues from
+the current position and does not reset it: call `no_lines()` before
+lexing a new input.
 
 ```erlang
 o_with(Rules, String) -> [Token]
@@ -168,13 +173,14 @@ o_longest(LexTable, String) -> [Token]
 ```
 
 The older, non-incremental driver, kept for compatibility (`String` must
-be a list). Equivalent to `with/2`; `o_longest/2` also resets the line
-count.
+be a list). Equivalent to `with/2`; `o_longest/2` also resets the
+position.
 
 ### Token helpers
 
-Functions that return ready-made actions. `Line` is `current_line()` at
-the time of the match, `Text` the token text (not reversed).
+Functions that return ready-made actions. `Line` is the line where the
+token starts (`current_line()` while the action runs), `Text` the token
+text (not reversed).
 
 | Helper | Emits |
 |---|---|
@@ -184,27 +190,69 @@ the time of the match, `Text` the token text (not reversed).
 | `op(Key)` | `{op, Line, Key}` |
 | `enclosed_token(Char, Tag)` | `{Tag, Text}` without the first and last character, which must both be `Char` |
 | `enclosed_token(Start, End, Tag)` | as above, with different start and end characters |
-| `string()` | `{string, Line, Text}` without the enclosing `"`; counts the newlines inside (escape sequences are not processed) |
-| `quoted_atom()` | `{atom, Line, Text}` without the enclosing `'`; counts the newlines inside |
-| `no_token()`, `whitespace()`, `comment()` | nothing |
-| `newline()` | nothing; increments the line count |
+| `string()` | `{string, Line, Text}` without the enclosing `"` (escape sequences are not processed) |
+| `quoted_atom()` | `{atom, Line, Text}` without the enclosing `'` |
+| `no_token()`, `whitespace()`, `comment()`, `newline()` | nothing |
 
-### Line counting
+`newline()` used to increment the line count; now the lexer counts
+lines itself, and `newline()` is the same as `whitespace()`.
 
-The line count is kept in the process dictionary, so it is per process
-and not safe to share between concurrent lexers in one process.
+### Line and column counting
+
+The lexer keeps track of the current position, a line and a column,
+both counted from 1. Every match, whether it gives a token or not,
+advances the position over the matched text:
+
+- a **line terminator** moves to column 1 of the next line;
+- any other character moves to the next column. Columns count
+  **characters**: code points in the Unicode encodings and `latin1`,
+  bytes in `bytes` mode. A tab is one column; there is no notion of tab
+  stops or display width.
+
+The line terminators depend on the option `{newline, NL}`:
+
+| `NL` | Line terminators | Default for |
+|---|---|---|
+| `unicode` | LF, VT, FF, CR, CR LF, NEL (U+0085), LINE SEPARATOR (U+2028), PARAGRAPH SEPARATOR (U+2029) | `latin1`, `utf8`, `utf16*`, `utf32*` |
+| `ascii` | LF, VT, FF, CR, CR LF | `bytes` |
+| `lf` | LF only (how `lex` used to count) | |
+
+The `unicode` set is the one of [UTS #18] RL1.6 and the Unicode
+Standard's newline guidelines (section 5.8). CR LF is one line break,
+also when the CR and the LF are matched by different rules. `unicode` is
+not allowed with `bytes`, since there the input may be UTF-8, in which
+the byte 16#85 is a continuation byte, not NEL.
+
+While an action runs, the position is that of the **start of its
+token**, so actions can include it in their tokens:
+
+```erlang
+positions(Utf8) ->
+    lex:with([{regexp, "\\p{L}+", at(word)}, {regexp, "\\s+", lex:whitespace()}],
+             Utf8, [{encoding, utf8}]).
+
+at(Tag) -> fun(Acc) -> {token, {Tag, lex:current_position(), lists:reverse(Acc)}} end.
+
+%% positions(<<"ab\ncd λ"/utf8>>)
+%% => [{word,{1,1},"ab"},{word,{2,1},"cd"},{word,{2,4},"λ"}]
+```
+
+(This is `lex_examples:positions/1`.)
+
+Actions do not need to count lines; tokens that span lines (strings,
+comments) are counted correctly by the lexer.
 
 | Function | |
 |---|---|
-| `no_lines()` | reset the line count to 1 |
-| `inc_lines()`, `inc_lines(N)` | add 1 or `N` |
-| `current_line()` | the current line |
-| `count_lines(Text)` | the number of `$\n` in `Text` |
+| `current_position()` | `{Line, Column}` |
+| `current_line()`, `current_column()` | the line and the column |
+| `no_lines()` | reset the position to line 1, column 1 |
+| `inc_lines()`, `inc_lines(N)` | add 1 or `N` to the line, e.g. for a directive that changes the line number; do not use it for line terminators, which are already counted |
+| `count_lines(Text)` | the number of line breaks in `Text` by the `ascii` rules (correct for both bytes and code points) |
+| `count_lines(Text, NL)` | the same with `NL` = `unicode`, `ascii` or `lf` |
 
-Lines are counted by your actions, typically with a rule
-`{regexp, "\n", lex:newline()}`, or `lex:inc_lines(lex:count_lines(...))`
-for tokens that span lines. Only `\n` counts: CR, U+2028 LINE SEPARATOR
-etc. are not lines unless your rules make them so.
+The position is kept in the process dictionary, so it belongs to the
+process: two lexers interleaved in one process share it.
 
 ### Other utilities
 
@@ -228,6 +276,7 @@ nfa_to_dfa(NFA) -> DFA
 minimize_dfa(DFA) -> DFA
 dfa_to_table(DFA, InternalRules) -> LexTable          % bytes
 dfa_to_table(DFA, InternalRules, Enc) -> LexTable
+dfa_to_table(DFA, InternalRules, Enc, NL) -> LexTable
 ```
 
 ### Unicode functions (`lex_unicode`)
@@ -265,6 +314,8 @@ Raised (as `exit`) by `regexps_to_table/1,2` and `with/2,3`:
 | `{unknown_posix_class, Name}` | bad `[:name:]` |
 | `{unencodable_char, CodePoint, Enc}` | a literal the encoding cannot represent (a surrogate, or above 255 in `latin1`) |
 | `{unknown_encoding, Enc}` | bad `{encoding, Enc}` |
+| `{unknown_newline, NL}` | bad `{newline, NL}` |
+| `{unicode_newline_needs_encoding, bytes}` | `{newline, unicode}` with the `bytes` encoding |
 
 Syntax errors (`Error` above) include `{illegal, Chars}`,
 `{unterminated, What}`, `{char_class, Range}` (bad range such as
@@ -272,18 +323,19 @@ Syntax errors (`Error` above) include `{illegal, Chars}`,
 
 ### While lexing
 
-Raised (as `exit`) by `with/2,3`, `one/2` and `o_longest/2`:
+Raised (as `exit`) by `with/2,3`, `one/2` and `o_longest/2`. Positions
+are counted as in [Line and column counting](#line-and-column-counting).
 
 ```erlang
-{lex_no_match, {line, Line}, {accumulated, Text}, {remainder, Rest}}
+{lex_no_match, {line, Line}, {column, Column}}
 ```
 
-No rule matches. `Text` is what was read of the failed token before
-the lexer gave up, `Rest` the rest of the input up to the end of the
-line. In the Unicode encodings both are code points.
+No rule matches the input at `Line`, `Column`: the position where the
+token that could not be matched starts. For an unterminated string, for
+example, that is the opening quote.
 
 ```erlang
-{lex_bad_encoding, Enc, Kind, {line, Line}, {accumulated, Text}, {bytes, Bytes}}
+{lex_bad_encoding, Enc, Kind, {line, Line}, {column, Column}, {bytes, Bytes}}
 ```
 
 The input is not well-formed in encoding `Enc` (only for `latin1`,
@@ -298,8 +350,8 @@ The input is not well-formed in encoding `Enc` (only for `latin1`,
 - `incomplete`: the input ends in the middle of a character.
 - `not_a_byte`: a list element is not an integer 0-255.
 
-`Bytes` are the offending bytes, and `Text` the code points of the
-current token before them.
+`Bytes` are the offending bytes, and `Line`, `Column` their position
+(also inside a token that spans several lines).
 
 How errors are told apart: a token always starts at a character
 boundary, and the table only accepts well-formed sequences, so when the
@@ -456,17 +508,17 @@ safe_lex(Utf8) ->
     try
         {ok, lex:with(ident_rules(), Utf8, [{encoding, utf8}])}
     catch
-        exit:{lex_bad_encoding, utf8, invalid, Line, _Acc, {bytes, Bytes}} ->
-            {error, {invalid_utf8, Line, Bytes}};
-        exit:{lex_bad_encoding, utf8, incomplete, Line, _Acc, {bytes, Bytes}} ->
-            {error, {truncated, Line, Bytes}};
-        exit:{lex_no_match, Line, _Acc, {remainder, Rest}} ->
-            {error, {unexpected, Line, Rest}}
+        exit:{lex_bad_encoding, utf8, invalid, {line, L}, {column, C}, {bytes, Bytes}} ->
+            {error, {invalid_utf8, {L, C}, Bytes}};
+        exit:{lex_bad_encoding, utf8, incomplete, {line, L}, {column, C}, {bytes, Bytes}} ->
+            {error, {truncated, {L, C}, Bytes}};
+        exit:{lex_no_match, {line, L}, {column, C}} ->
+            {error, {unexpected, {L, C}}}
     end.
 
-%% safe_lex(<<"ok", 16#FF>>)            => {error,{invalid_utf8,{line,1},[255]}}
-%% safe_lex(<<"ok ", 16#E2, 16#82>>)    => {error,{truncated,{line,1},[226,130]}}
-%% safe_lex(<<"ok ?">>)                 => {error,{unexpected,{line,1},"?"}}
+%% safe_lex(<<"ok", 16#FF>>)                  => {error,{invalid_utf8,{1,3},[255]}}
+%% safe_lex(<<"ok\nλ "/utf8, 16#E2, 16#82>>)  => {error,{truncated,{2,3},[226,130]}}
+%% safe_lex(<<"ok ?">>)                       => {error,{unexpected,{1,4}}}
 ```
 
 ### Larger specifications
@@ -662,13 +714,16 @@ Unicode, version 17.0.0:
   <https://www.unicode.org/versions/Unicode17.0.0/>; in particular
   [chapter 3](https://www.unicode.org/versions/Unicode17.0.0/core-spec/chapter-3/),
   section 3.9 "Unicode Encoding Forms" (UTF-8, UTF-16, UTF-32, and
-  Table 3-7, the well-formed UTF-8 byte sequences).
+  Table 3-7, the well-formed UTF-8 byte sequences), and
+  [chapter 5](https://www.unicode.org/versions/Unicode17.0.0/core-spec/chapter-5/),
+  section 5.8 "Newline Guidelines" (line terminators).
 - The Unicode Character Database, <https://www.unicode.org/Public/17.0.0/ucd/>.
 - [UAX #44], Unicode Character Database: file formats, property and value
   aliases, general category values (section 5.7.1), loose matching of
   names (UAX44-LM3).
 - [UTS #18], Unicode Regular Expressions: properties (RL1.2), simple
-  loose matching for case-insensitivity (RL1.5); see the table under
+  loose matching for case-insensitivity (RL1.5), line terminators
+  (RL1.6); see the table under
   [Limitations](#limitations-and-future-work) for what is covered.
 - [UAX #24], Unicode Script Property: Script and Script_Extensions.
 - [UAX #31], Unicode Identifiers and Syntax: `XID_Start`/`XID_Continue`.
@@ -699,7 +754,8 @@ Syntax and semantics of the classes:
   makes literals match all canonically equivalent sequences.
 - **Grapheme clusters.** `.` and classes match one code point, not a
   user-perceived character ([UAX #29], [UTS #18] RL2.2); there is no
-  `\X`. `[^"]` happily matches a lone combining mark.
+  `\X`. `[^"]` happily matches a lone combining mark, and a column is a
+  code point, not a grapheme cluster.
 - **Case folding** is simple folding only: no multi-character folds
   (`ß` / `SS`, `ﬁ` / `fi`), no Turkic or other locale-specific mappings
   ([UTS #18] RL2.4 is not met). `(?i)` is only allowed at the start of
@@ -714,8 +770,10 @@ Syntax and semantics of the classes:
   ALPHA}`, RL2.5), wildcards in property values (RL2.6), string
   properties such as `RGI_Emoji`, and set operations in classes
   (`[\p{L}--\p{Lu}]`, RL1.3).
-- **Boundaries.** No word boundaries (`\b`, RL1.4) or line boundaries
-  (RL1.6), and no anchors at all (`^`, `$`).
+- **Boundaries.** No word boundaries (`\b`, RL1.4). All the line
+  terminators of RL1.6 are recognized when counting lines, but there are
+  no anchors (`^`, `$`), and `.` excludes only LF, not the other line
+  terminators.
 - **Encodings.** No automatic detection of the encoding or BOM handling;
   no UTF-16 or UTF-32 without a declared byte order; no CESU-8 or
   Java's "modified UTF-8"; no legacy encodings other than Latin-1.
@@ -732,7 +790,7 @@ Syntax and semantics of the classes:
 | RL1.3 Subtraction and Intersection | no |
 | RL1.4 Simple Word Boundaries | no |
 | RL1.5 Simple Loose Matches | yes: `(?i)` with simple case folding |
-| RL1.6 Line Boundaries | no |
+| RL1.6 Line Boundaries | partly: line counting recognizes all the line terminators, but there are no `^`/`$` anchors, and `.` excludes only LF |
 | RL1.7 Supplementary Code Points | yes: all code points, surrogate pairs in UTF-16 |
 
 ### The lexer in general
@@ -750,10 +808,12 @@ Syntax and semantics of the classes:
 - **No match** stops lexing with an exception; there is no built-in
   recovery (`lex`/`flex` echo and skip the character). Add a catch-all
   rule if needed.
-- **Error positions** are given as a line and the surrounding text, not
-  as a byte offset or column.
-- **Line counting** uses the process dictionary, counts only `\n`, and
-  is done by the actions.
+- **Positions** are a line and a column in characters (code points, or
+  bytes in `bytes` mode). There is no byte offset, and columns do not
+  account for tab stops, display width (wide CJK characters, combining
+  marks) or the UTF-16 code units that some editors and the Language
+  Server Protocol use. The position is kept in the process dictionary,
+  so it is per process; future work: keep it in the lexer state.
 - **Table size.** Every state is a 256-element tuple. Sparse tables,
   equivalence classes of bytes (as in `flex`), or generating Erlang code
   from the DFA (as `leex` does) would make large and little-endian
