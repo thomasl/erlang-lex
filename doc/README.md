@@ -114,10 +114,12 @@ existing specifications behave exactly as before. In every other
 encoding, regexps are strings of code points and may use the Unicode
 features of [syntax.md](syntax.md#8-bytes-mode-versus-the-unicode-encodings).
 
-**Input** is always bytes: a binary, or a list of integers 0-255. To lex
-an Erlang string (a list of code points), encode it first, e.g.
-`unicode:characters_to_binary(Str)` for UTF-8. Passing the string itself
-is an error (`not_a_byte`) as soon as it contains a code point above 255.
+**Input** is always bytes, as iodata: a binary, or a list of bytes
+(integers 0-255), binaries and such lists, nested to any depth (see
+[Iolist input](#iolist-input)). To lex an Erlang string (a list of
+code points), encode it first, e.g. `unicode:characters_to_binary(Str)`
+for UTF-8. Passing the string itself is an error (`not_a_byte`) as soon
+as it contains a code point above 255.
 
 **Byte order marks** are not interpreted: U+FEFF is an ordinary
 character. Choose `utf16le`/`utf16be` yourself, and skip a BOM either by
@@ -134,10 +136,11 @@ with(Rules, Input) -> [Token]
 with(Rules, Input, Options) -> [Token]
 ```
 
-Build a table from `Rules` and lex all of `Input`, a binary or a list.
-A binary is lexed directly by the [binary driver](#binary-input), a list
-by the list driver; both give the same tokens. Resets the position to
-line 1, column 1 first. Exits on errors (see [Errors](#errors)).
+Build a table from `Rules` and lex all of `Input`, which is iodata. A
+binary is lexed directly by the [binary driver](#binary-input), a list
+(flat or nested) by the [iolist driver](#iolist-input); they give the
+same tokens. Resets the position to line 1, column 1 first. Exits on
+errors (see [Errors](#errors)).
 
 ```erlang
 regexps_to_table(Rules) -> LexTable
@@ -164,7 +167,8 @@ one(LexTable, Input) -> {token, Token, Rest} | end_of_stream
 Return the next token and the rest of the input, or `end_of_stream`
 when only skipped text (`no_token`) remains. The rest has the same form
 as `Input`: for a binary, a sub-binary of it (nothing is copied); for a
-list, a list. This is the interface for a parser that pulls tokens one
+list, iodata made of what remains of its parts (for a flat list of
+bytes, simply its tail). This is the interface for a parser that pulls tokens one
 at a time ([example 7](#7-pulling-tokens-one-at-a-time)). `one/2`
 continues from the current position and does not reset it: call
 `no_lines()` before lexing a new input.
@@ -213,6 +217,47 @@ try pull(Lex, Bin, []) after process_flag(min_bin_vheap_size, Old) end
 
 or lex in a process spawned with
 `spawn_opt(Fun, [{min_bin_vheap_size, 2 * Words}])`.
+
+### Iolist input
+
+A list is lexed as iodata, the type of `iolist_to_binary/1` and of most
+I/O functions: bytes, binaries and nested lists of them, where a binary
+may also be the tail of a list (`[$a, $b | <<"cd">>]`). It is read in
+place, piece by piece, without flattening it or copying it into a
+binary, so input assembled from many parts (file chunks, the output of
+other functions) can be lexed as it is:
+
+```erlang
+%% with the rules of example 3
+lex:with(ident_rules(), [<<"λx = "/utf8>>, ["42", $\s], [[<<"+ 1">>]]], [{encoding, utf8}])
+%% => [{ident,1,"λx"},{'=',1},{num,1,"42"},{'+',1},{num,1,"1"}]
+```
+
+(This is `lex_examples:iodata/1`.)
+
+Tokens and characters may span pieces: a token, or a UTF-8 character,
+can start in one binary and end in the next.
+
+The iolist driver keeps a cursor: the piece being read and a stack of
+what comes after it. Reading a byte from a list allocates nothing, and a
+binary piece is read like in the binary driver. A flat list of bytes is
+the simplest iolist, and lexes as fast as with the original list driver
+(still available as `lex:one_list/2` and `lex:lex_string/2`, for flat
+lists only). With small pieces (1-64 bytes) a nested iolist takes a
+fifth to a half longer than the same bytes as one flat list.
+
+For `one/2`, the rest is again iodata, built from what remains of the
+input's parts, so it can be passed back to `one/2` or to any function
+that takes iodata.
+
+An element that is not a byte, a binary or a list (an integer above
+255, an atom, a bitstring that is not a whole number of bytes) is an
+error when the lexer reaches it: `not_a_byte` in the encodings other
+than `bytes`, `lex_no_match` in `bytes`.
+
+`with/2,3` raises `min_bin_vheap_size` (see [Binary input](#binary-input))
+to the size of the input while lexing a list, since binaries in it have
+the same effect on garbage collection as a single binary does.
 
 ### Token helpers
 
@@ -386,7 +431,9 @@ The input is not well-formed in encoding `Enc` (only for `latin1`,
   an unpaired surrogate; in UTF-32 a surrogate or a value above
   10FFFF.
 - `incomplete`: the input ends in the middle of a character.
-- `not_a_byte`: a list element is not an integer 0-255.
+- `not_a_byte`: an element of an input list is not a byte, a binary or a
+  list (for example a code point above 255 in a string that was not
+  encoded).
 
 `Bytes` are the offending bytes, and `Line`, `Column` their position
 (also inside a token that spans several lines).
@@ -638,9 +685,9 @@ end symbol yourself.
    to "no match".
 8. **Driving.** The driver reads one byte at a time, remembers the last
    accepting position, and on getting stuck emits the longest match and
-   restarts after it (backtracking if needed, see below). There are two
-   drivers with the same behaviour, for lists and for binaries (see
-   [Binary input](#binary-input)). In the Unicode encodings the action
+   restarts after it (backtracking if needed, see below). There are
+   drivers with the same behaviour for binaries and for iolists (see
+   [Binary input](#binary-input) and [Iolist input](#iolist-input)). In the Unicode encodings the action
    gets the token decoded into code points.
 
 Steps 4-8 are independent of the encoding: Unicode is entirely handled
@@ -677,7 +724,9 @@ same binary):
 (The memory is that of the lexing process afterwards; most of it is the
 tokens, plus the list of the input for a list.) That is 10-30 MB/s. The
 time is mostly spent per token, on the actions and on keeping track of
-the position, rather than per byte.
+the position, rather than per byte. The same bytes as a nested iolist
+of pieces of 1-64 bytes (binaries, byte lists and nested lists) took
+57 ms (`bytes`) and 53 ms (`utf8`, Greek, CJK and ASCII).
 
 A table takes about 257 words (2 KB) per state, so the tables above
 are 0.3-1.3 MB. Little-endian encodings give bigger tables, since the

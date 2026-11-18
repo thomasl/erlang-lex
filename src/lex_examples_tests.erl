@@ -5,7 +5,8 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -import(lex_examples, [calc/1, config/1, idents/1, sql/1, utf16_file/1,
-                       scripts/1, tokens_one_by_one/1, safe_lex/1, positions/1]).
+                       scripts/1, tokens_one_by_one/1, safe_lex/1, positions/1,
+                       iodata/1]).
 
 calc_test() ->
     ?assertEqual([{num, 1, "12"}, {'+', 1}, {'(', 1}, {num, 1, "3"}, {'*', 1},
@@ -44,3 +45,7 @@ safe_lex_test() ->
 positions_test() ->
     ?assertEqual([{word, {1, 1}, "ab"}, {word, {2, 1}, "cd"}, {word, {2, 4}, "λ"}],
                  positions(<<"ab\ncd λ"/utf8>>)).
+
+iodata_test() ->
+    ?assertEqual([{ident, 1, "λx"}, {'=', 1}, {num, 1, "42"}, {'+', 1}, {num, 1, "1"}],
+                 iodata([<<"λx = "/utf8>>, ["42", $\s], [[<<"+ 1">>]]])).

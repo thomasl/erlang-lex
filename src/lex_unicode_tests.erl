@@ -552,6 +552,9 @@ random_input(Enc) ->
             Bin
     end.
 
+%% Four drivers, one result: the binary driver on the binary, the iolist
+%% driver on a random iolist of the same bytes and on the flat list, and
+%% the original list driver (lex_string/2) on the flat list.
 driver_equivalence_test_() ->
     {timeout, 120,
      fun() ->
@@ -560,11 +563,61 @@ driver_equivalence_test_() ->
                    Rules = driver_rules(Enc),
                    Opts = [{encoding, Enc}],
                    Bin = random_input(Enc),
+                   IoList = random_iolist(Bin),
+                   ?assertEqual(Bin, iolist_to_binary(IoList)),
                    FromBin = caught(fun() -> lex:with(Rules, Bin, Opts) end),
+                   FromIoList = caught(fun() -> lex:with(Rules, IoList, Opts) end),
                    FromList = caught(fun() -> lex:with(Rules, binary_to_list(Bin), Opts) end),
-                   ?assertEqual({Enc, Bin, FromList}, {Enc, Bin, FromBin})
+                   FromOld = caught(fun() ->
+                                            Lex = lex:regexps_to_table(Rules, Opts),
+                                            lex:no_lines(),
+                                            lex:lex_string(Lex, binary_to_list(Bin))
+                                    end),
+                   ?assertEqual({Enc, Bin, FromBin}, {Enc, Bin, FromIoList}),
+                   ?assertEqual({Enc, Bin, FromBin}, {Enc, Bin, FromList}),
+                   ?assertEqual({Enc, Bin, FromBin}, {Enc, Bin, FromOld})
                end || Enc <- [bytes, latin1 | ?ENCODINGS], _ <- lists:seq(1, 500) ]
      end}.
+
+%% The bytes of Bin as a random iolist: binaries, byte lists, nested
+%% lists, empty pieces, and binaries as improper list tails.
+random_iolist(Bin) ->
+    Pieces = split_randomly(Bin),
+    nest(Pieces).
+
+split_randomly(<<>>) ->
+    [];
+split_randomly(Bin) ->
+    N = rand:uniform(min(byte_size(Bin), 6)),
+    <<P:N/binary, Rest/binary>> = Bin,
+    [P | split_randomly(Rest)].
+
+nest([]) ->
+    case rand:uniform(3) of
+        1 -> [];
+        2 -> [<<>>];
+        3 -> [[]]
+    end;
+nest([P]) ->
+    case rand:uniform(4) of
+        1 -> [[] | P];                                   % a binary as the tail
+        _ -> [piece(P) | nest([])]
+    end;
+nest([P | Ps]) ->
+    case rand:uniform(5) of
+        1 -> binary_to_list(P) ++ nest(Ps);              % bytes in this list
+        _ -> [piece(P) | nest(Ps)]
+    end.
+
+piece(P) ->
+    case rand:uniform(5) of
+        1 -> P;                                          % a binary
+        2 -> binary_to_list(P);                          % a nested byte list
+        3 -> [binary_to_list(P)];                        % nested deeper
+        4 -> [[<<>>, P]];                                % with an empty binary
+        5 -> <<B, Rest/binary>> = P, [B | Rest]          % improper tail inside
+    end.
+
 
 %% one/2 on a binary: the rest is a sub-binary, and lexing can continue
 one_binary_test() ->
@@ -606,3 +659,50 @@ gc_limits_restored_test() ->
     after 30000 ->
             error(timeout)
     end.
+
+
+%% one/2 on an iolist returns the rest as iodata, sharing the input
+one_iolist_test() ->
+    Lex = lex:regexps_to_table(driver_rules(utf8), [{encoding, utf8}]),
+    lex:no_lines(),
+    In = [<<"aa">>, [$a, $\s | <<"ab">>], [[<<" \"λ"/utf8>>], "\n\" "], <<"c">>],
+    Pull = fun Loop(I, Acc) ->
+                   case lex:one(Lex, I) of
+                       {token, T, R} -> Loop(R, [{T, iolist_to_binary(R)} | Acc]);
+                       end_of_stream -> lists:reverse(Acc)
+                   end
+           end,
+    ?assertEqual([{{a, {1, 1}, "a"}, <<"aa ab \"λ\n\" c"/utf8>>},
+                  {{a, {1, 2}, "a"}, <<"a ab \"λ\n\" c"/utf8>>},
+                  {{a, {1, 3}, "a"}, <<" ab \"λ\n\" c"/utf8>>},
+                  {{ab, {1, 5}, "ab"}, <<" \"λ\n\" c"/utf8>>},
+                  {{s, {1, 8}, "\"λ\n\""}, <<" c">>},
+                  {{w, {2, 3}, "c"}, <<>>}],
+                 Pull(In, [])),
+    %% a flat list's rest is its tail
+    {token, _, Rest} = lex:one(Lex, "cd ab"),
+    ?assertEqual(" ab", Rest).
+
+iolist_shapes_test_() ->
+    W = fun(In) -> caught(fun() -> lex:with(driver_rules(utf8), In, [{encoding, utf8}]) end) end,
+    [?_assertEqual([], W([])),
+     ?_assertEqual([], W([[], <<>>, [[<<>>]]])),
+     %% improper tails
+     ?_assertEqual([{w, {1, 1}, "cdde"}], W([$c, $d | <<"de">>])),
+     ?_assertEqual([{w, {1, 1}, "cd"}, {w, {1, 4}, "ed"}], W([[$c | <<"d">>], $\s | <<"ed">>])),
+     %% a multibyte character split over pieces
+     ?_assertEqual([{w, {1, 1}, "cλd"}], W([<<"c", 16#CE>>, [16#BB], <<"d">>])),
+     %% deep nesting
+     ?_assertEqual([{w, {1, 1}, "cde"}],
+                   W(lists:foldl(fun(_, Acc) -> [Acc] end, [<<"cde">>], lists:seq(1, 1000))))].
+
+%% elements that are not bytes, binaries or lists
+iolist_bad_elements_test_() ->
+    U = fun(In) -> caught(fun() -> lex:with(driver_rules(utf8), In, [{encoding, utf8}]) end) end,
+    B = fun(In) -> caught(fun() -> lex:with(driver_rules(bytes), In, []) end) end,
+    [?_assertEqual(bad(utf8, not_a_byte, 3, [300]), U([<<"cd">>, 300])),
+     ?_assertEqual(bad(utf8, not_a_byte, 2, 2, [foo]), U([<<"cd\n ">>, [foo]])),
+     ?_assertEqual(bad(utf8, not_a_byte, 4, [<<1:3>>]), U([<<"\"cd">>, <<1:3>>])),
+     ?_assertEqual(bad(utf8, not_a_byte, 3, [bar]), U([$c, $d | bar])),
+     ?_assertEqual({'EXIT', {lex_no_match, {line, 1}, {column, 3}}}, B([<<"cd">>, 300])),
+     ?_assertEqual({'EXIT', {lex_no_match, {line, 1}, {column, 1}}}, B([foo]))].

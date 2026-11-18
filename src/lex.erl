@@ -220,16 +220,29 @@ with(Regexp_rules, Str) ->
 with(Regexp_rules, Bin, Opts) when is_binary(Bin) ->
     %% see "Garbage collection" under "Binary driver"
     with_gc_limits(
-      Bin,
+      [vheap, heap], byte_size(Bin),
       fun() ->
 	      LEX = regexps_to_table(Regexp_rules, Opts),
 	      no_lines(),
 	      lex_binary(LEX, Bin)
       end);
-with(Regexp_rules, List, Opts) when is_list(List) ->
-    LEX = regexps_to_table(Regexp_rules, Opts),
-    no_lines(),
-    lex_string(LEX, List).
+with(Regexp_rules, IoList, Opts) when is_list(IoList) ->
+    %% A list is on the heap already, so only binaries in it matter.
+    with_gc_limits(
+      [vheap], io_size(IoList),
+      fun() ->
+	      LEX = regexps_to_table(Regexp_rules, Opts),
+	      no_lines(),
+	      lex_iolist(LEX, IoList)
+      end).
+
+%% the size of iodata; 0 if it holds anything else (which the lexer then
+%% reports when it gets there)
+
+io_size(IoList) ->
+    try iolist_size(IoList)
+    catch error:badarg -> 0
+    end.
 
 %% (testing: convert file to string)
 f(File) ->
@@ -240,7 +253,7 @@ lex_string(LEX, Str) ->
     lex_string(LEX, Str, []).
 
 lex_string(LEX, Str, Acc) ->
-    case one(LEX, Str) of
+    case one_list(LEX, Str) of
 	{token, T, RestStr} ->
 	    lex_string(LEX, RestStr, [T|Acc]);
 	{no_match, _Line, _AccToken, _Remains} = NOMATCH ->
@@ -270,14 +283,22 @@ lex_string(LEX, Str, Acc) ->
 %%  ... or exits with {lex_no_match, ...} or (for the Unicode encodings)
 %%  {lex_bad_encoding, ...}, see report_no_match/3.
 %%
-%% The input is a binary or a list of bytes, and the rest is returned in
-%% the same form: a binary (a sub-binary of the input, see "Binary
-%% driver") or a list. In the Unicode encodings the action receives the
-%% token as a (reversed) list of code points.
+%% The input is iodata: a binary (see "Binary driver") or a list of
+%% bytes, binaries and such lists (see "Iolist driver"). The rest is
+%% returned in the same form: a sub-binary of a binary, or iodata for a
+%% list (for a flat list of bytes, its tail). In the Unicode encodings
+%% the action receives the token as a (reversed) list of code points.
 
 one(LEX, Bin) when is_binary(Bin) ->
     one_binary(LEX, Bin);
-one(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, String) ->
+one(LEX, IoList) when is_list(IoList) ->
+    one_iolist(LEX, IoList).
+
+%% The original list driver, for flat lists of bytes only. one/2 and
+%% with/2,3 now use the iolist driver for lists, which gives the same
+%% results (the tests check this against one_list/2 and lex_string/2).
+
+one_list(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, String) ->
     try longest_string(LEX, String)
     catch
 	throw:{?MODULE, no_match, RevAcc, Remainder} ->
@@ -471,7 +492,8 @@ one_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, Bin) ->
 %% about as large as the input, with many garbage collections on the way.
 %% Two process settings matter, and with/2,3 raises both for the
 %% duration of the call, including building the table (then restores
-%% them), see with_gc_limits/2:
+%% them), see with_gc_limits/3. (For a list, only min_bin_vheap_size:
+%% the list itself is already on the heap.)
 %%
 %% - min_bin_vheap_size: the input binary is referenced from the old
 %%   heap, and counts against its "virtual binary heap". If the binary is
@@ -491,10 +513,12 @@ one_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, Bin) ->
 -define(heap_words_per_byte, 2).
 -define(max_gc_hint, 16#1000000).
 
-with_gc_limits(Bin, Fun) ->
-    Words = byte_size(Bin) div erlang:system_info(wordsize) + 1,
-    Restore = raise_gc_limits([{min_bin_vheap_size, 2 * Words},
-			       {min_heap_size, ?heap_words_per_byte * byte_size(Bin)}]),
+with_gc_limits(Which, Size, Fun) ->
+    Words = Size div erlang:system_info(wordsize) + 1,
+    Limits = [ L || {Kind, L} <- [{vheap, {min_bin_vheap_size, 2 * Words}},
+				  {heap, {min_heap_size, ?heap_words_per_byte * Size}}],
+		    lists:member(Kind, Which) ],
+    Restore = raise_gc_limits(Limits),
     try Fun()
     after
 	[ process_flag(Flag, Old) || {Flag, Old} <- Restore ]
@@ -578,6 +602,184 @@ bin_report_no_match(Enc, NL, Bin, Len) ->
     More = binary:part(Rest, 0, min(byte_size(Rest), 8)),
     report_no_match(Enc, NL, lists:reverse(binary_to_list(Acc)),
 		    binary_to_list(More)).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%% Iolist driver
+%%
+%% Lexes iodata: a binary, or a possibly nested list of bytes and
+%% binaries, possibly with a binary as the tail of a list
+%% ([..., Bin1 | Bin2]), without flattening it or copying it to a binary.
+%% Same longest-match semantics, actions, positions and errors as the
+%% other drivers:
+%%
+%%   one_iolist(LEX, IoData) -> {token, T, Rest} | end_of_stream
+%%     Rest is iodata: what remains of IoData, sharing its parts.
+%%   lex_iolist(LEX, IoData) -> [T]
+%%
+%% The input is consumed through a cursor {Cur, Stack}: Cur is the
+%% iodata being read, and Stack the iodata still to read after it (the
+%% tails of the lists Cur came from), innermost first. Reading from a
+%% list of bytes allocates nothing; a binary is read by io_scan_b/10
+%% with a binary match (a reused match context, as in the binary
+%% driver); a nested list or a binary in a list pushes the rest of the
+%% list on Stack. As for binaries, the scan only remembers the length of
+%% the longest accepting prefix; the cursor after the token is found
+%% again by skipping that many bytes from the token start (io_skip/3).
+%%
+%% An element that is neither a byte, a binary nor a list (an integer
+%% above 255, an atom, a bitstring that is not a binary) cannot be part
+%% of a token; it is reported like a non-byte in a list (not_a_byte in
+%% the Unicode encodings, lex_no_match in bytes mode).
+
+one_iolist(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, IoData) ->
+    try io_longest(LEX, IoData, []) of
+	{token, T, {Cur, Stack}} ->
+	    {token, T, io_join(Cur, Stack)};
+	end_of_stream ->
+	    end_of_stream
+    catch
+	throw:{?MODULE, io_no_match, Cur, Stack, Len} ->
+	    io_report_no_match(Enc, NL, Cur, Stack, Len)
+    end.
+
+lex_iolist(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, IoData) ->
+    try lex_iolist(LEX, IoData, [], [])
+    catch
+	throw:{?MODULE, io_no_match, Cur, Stack, Len} ->
+	    io_report_no_match(Enc, NL, Cur, Stack, Len)
+    end.
+
+lex_iolist(LEX, Cur, Stack, Acc) ->
+    case io_longest(LEX, Cur, Stack) of
+	{token, T, {Cur1, Stack1}} ->
+	    lex_iolist(LEX, Cur1, Stack1, [T|Acc]);
+	end_of_stream ->
+	    lists:reverse(Acc)
+    end.
+
+%% Find the next token, skipping no_token matches.
+
+io_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL}, Cur, Stack) ->
+    case io_scan(Cur, Stack, Start, Table, AcceptLimit, 0, [], 0, 0, []) of
+	{accept, State, Len, RevAcc} ->
+	    {Cur1, Stack1} = io_skip(Cur, Stack, Len),
+	    case emit_token(Actions, State, RevAcc) of
+		no_token ->
+		    io_longest(LEX, Cur1, Stack1);
+		{token, T} ->
+		    token(T, {Cur1, Stack1})
+	    end;
+	{fail, 0, at_end} ->
+	    end_of_stream;
+	{fail, Len, _} ->
+	    throw({?MODULE, io_no_match, Cur, Stack, Len})
+    end.
+
+%% io_scan(Cur, Stack, State, Table, AcceptLimit, N, RevAcc,
+%%         LastState, LastLen, LastRevAcc)
+%%   as scan/9 of the binary driver, reading from the cursor.
+%%
+%% Returns {accept, State, Len, RevAcc}, or {fail, N, at_end | stuck}:
+%% N bytes were read before the input ended (at_end) or the DFA got
+%% stuck or met an element that is not a byte (stuck).
+
+io_scan([B | T], Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc)
+  when is_integer(B), B >= 0, B =< 255 ->
+    case element(B+1, element(State, Table)) of
+	?no_match ->
+	    io_done(stuck, N, LastState, LastLen, LastRevAcc);
+	Next when ?is_accepting(Next, AcceptLimit) ->
+	    Acc = [B|RevAcc],
+	    io_scan(T, Stack, Next, Table, AcceptLimit, N+1, Acc, Next, N+1, Acc);
+	Next ->
+	    io_scan(T, Stack, Next, Table, AcceptLimit, N+1, [B|RevAcc], LastState, LastLen, LastRevAcc)
+    end;
+io_scan([H | T], Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc)
+  when is_list(H); is_binary(H) ->
+    io_scan(H, [T|Stack], State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc);
+io_scan([], [Next | Stack], State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
+    io_scan(Next, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc);
+io_scan([], [], _State, _Table, _AcceptLimit, N, _RevAcc, LastState, LastLen, LastRevAcc) ->
+    io_done(at_end, N, LastState, LastLen, LastRevAcc);
+io_scan(Bin, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc)
+  when is_binary(Bin) ->
+    io_scan_b(Bin, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc);
+io_scan(_NotIoData, _Stack, _State, _Table, _AcceptLimit, N, _RevAcc, LastState, LastLen, LastRevAcc) ->
+    io_done(stuck, N, LastState, LastLen, LastRevAcc).
+
+io_scan_b(<<C, Rest/binary>>, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
+    case element(C+1, element(State, Table)) of
+	?no_match ->
+	    io_done(stuck, N, LastState, LastLen, LastRevAcc);
+	Next when ?is_accepting(Next, AcceptLimit) ->
+	    Acc = [C|RevAcc],
+	    io_scan_b(Rest, Stack, Next, Table, AcceptLimit, N+1, Acc, Next, N+1, Acc);
+	Next ->
+	    io_scan_b(Rest, Stack, Next, Table, AcceptLimit, N+1, [C|RevAcc], LastState, LastLen, LastRevAcc)
+    end;
+io_scan_b(<<>>, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
+    io_scan([], Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc).
+
+io_done(How, N, _LastState, 0, _LastRevAcc) ->
+    {fail, N, How};
+io_done(_How, _N, LastState, LastLen, LastRevAcc) ->
+    {accept, LastState, LastLen, LastRevAcc}.
+
+%% io_skip(Cur, Stack, N) -> {Cur, Stack} after N bytes. Only used on
+%% bytes that io_scan/10 has read, so they are all there and all bytes.
+
+io_skip(Cur, Stack, 0) ->
+    {Cur, Stack};
+io_skip([B | T], Stack, N) when is_integer(B) ->
+    io_skip(T, Stack, N-1);
+io_skip([H | T], Stack, N) ->
+    io_skip(H, [T|Stack], N);
+io_skip([], [Next | Stack], N) ->
+    io_skip(Next, Stack, N);
+io_skip(Bin, Stack, N) when is_binary(Bin) ->
+    case byte_size(Bin) of
+	Size when Size >= N ->
+	    <<_:N/binary, Rest/binary>> = Bin,
+	    {Rest, Stack};
+	Size ->
+	    io_skip([], Stack, N - Size)
+    end.
+
+%% The cursor as iodata: Cur followed by the elements of Stack.
+
+io_join(Cur, []) ->
+    Cur;
+io_join(Cur, Stack) ->
+    [Cur | Stack].
+
+%% Errors are reported as by the list driver, from the bytes of the
+%% failed token and a few more (see bin_report_no_match/4). An element
+%% that is not a byte ends the list, so that it is reported as such.
+
+io_report_no_match(Enc, NL, Cur, Stack, Len) ->
+    Elements = io_take(Cur, Stack, Len + 8, []),
+    {Acc, Rest} = lists:split(min(Len, length(Elements)), Elements),
+    report_no_match(Enc, NL, lists:reverse(Acc), Rest).
+
+io_take(_Cur, _Stack, 0, Acc) ->
+    lists:reverse(Acc);
+io_take([B | T], Stack, K, Acc) when is_integer(B) ->
+    io_take(T, Stack, K-1, [B|Acc]);
+io_take([H | T], Stack, K, Acc) when is_list(H); is_binary(H) ->
+    io_take(H, [T|Stack], K, Acc);
+io_take([], [Next | Stack], K, Acc) ->
+    io_take(Next, Stack, K, Acc);
+io_take([], [], _K, Acc) ->
+    lists:reverse(Acc);
+io_take(<<C, Rest/binary>>, Stack, K, Acc) ->
+    io_take(Rest, Stack, K-1, [C|Acc]);
+io_take(<<>>, Stack, K, Acc) ->
+    io_take([], Stack, K, Acc);
+io_take([Bad | _], _Stack, _K, Acc) ->
+    lists:reverse([Bad|Acc]);
+io_take(Bad, _Stack, _K, Acc) ->
+    lists:reverse([Bad|Acc]).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%

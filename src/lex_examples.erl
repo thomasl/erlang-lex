@@ -13,7 +13,8 @@
          scripts/1,
          tokens_one_by_one/1,
          safe_lex/1,
-         positions/1]).
+         positions/1,
+         iodata/1]).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% 1. A calculator lexer in the default (bytes) encoding.
@@ -175,3 +176,13 @@ positions(Utf8) ->
              Utf8, [{encoding, utf8}]).
 
 at(Tag) -> fun(Acc) -> {token, {Tag, lex:current_position(), lists:reverse(Acc)}} end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% 10. Iodata input: nested lists of bytes and binaries are lexed as
+%%     they are, as in doc/README.md, "Iolist input".
+%%
+%%   lex_examples:iodata([<<"λx = "/utf8>>, ["42", $\s], [[<<"+ 1">>]]])
+%%   => [{ident,1,"λx"},{'=',1},{num,1,"42"},{'+',1},{num,1,"1"}]
+
+iodata(IoData) ->
+    lex:with(ident_rules(), IoData, [{encoding, utf8}]).
