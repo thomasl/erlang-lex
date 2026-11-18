@@ -847,3 +847,102 @@ socket_test() ->
     ?assertEqual([{w, {1, 1}, "hello"}, {w, {1, 7}, "world"}, {semi, {1, 12}},
                   {w, {1, 14}, "λμ"}, {semi, {1, 16}}, {w, {2, 1}, "x"}],
                  Tokens).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Backtracking across many fragments: the rule "a*b|a" read 1 byte at
+%% a time. On "aaaa" the lexer reads all four bytes looking for a "b",
+%% fails, and backs up to the first "a"; then again from the second, and
+%% so on. Each step crosses several 1-byte fragments.
+
+%% A More function that returns Bin one byte per call, alternating
+%% between a binary and a list, and counts its calls in Counter.
+byte_by_byte(Bin, Counter) ->
+    byte_by_byte(Bin, Counter, 0).
+
+byte_by_byte(Bin, Counter, I) ->
+    fun() ->
+            counters:add(Counter, 1, 1),
+            case Bin of
+                <<>> -> ended;
+                <<B, Rest/binary>> ->
+                    Fragment = case I rem 2 of 0 -> <<B>>; 1 -> [B] end,
+                    {more, Fragment, byte_by_byte(Rest, Counter, I + 1)}
+            end
+    end.
+
+ab_rules() ->
+    [{regexp, "a*b|a", at(t)}, {regexp, " ", lex:whitespace()}].
+
+encode_for(bytes, Text) -> list_to_binary(Text);
+encode_for(Enc, Text) -> unicode:characters_to_binary(Text, unicode, Enc).
+
+%% {Tokens or error, number of More() calls}
+lex_byte_by_byte(Text, Enc) ->
+    Bin = encode_for(Enc, Text),
+    Counter = counters:new(1, []),
+    Result = caught(fun() -> lex:with(ab_rules(), <<>>, byte_by_byte(Bin, Counter),
+                                      [{encoding, Enc}]) end),
+    {Result, counters:get(Counter, 1), byte_size(Bin)}.
+
+%% The same through one/3, token by token
+pull_byte_by_byte(Text, Enc) ->
+    Bin = encode_for(Enc, Text),
+    Lex = lex:regexps_to_table(ab_rules(), [{encoding, Enc}]),
+    lex:no_lines(),
+    caught(fun() -> pull_more(Lex, <<>>, byte_by_byte(Bin, counters:new(1, [])), []) end).
+
+ab_cases() ->
+    [{"a", [{t, {1, 1}, "a"}]},
+     {"b", [{t, {1, 1}, "b"}]},
+     {"ab", [{t, {1, 1}, "ab"}]},
+     %% no "b": every "a" is found by reading to the end and backing up
+     {"aaaa", [{t, {1, 1}, "a"}, {t, {1, 2}, "a"}, {t, {1, 3}, "a"}, {t, {1, 4}, "a"}]},
+     {"aaaab", [{t, {1, 1}, "aaaab"}]},
+     %% backtracking stops at the space: "aaa" then the next token
+     {"aaa aab", [{t, {1, 1}, "a"}, {t, {1, 2}, "a"}, {t, {1, 3}, "a"}, {t, {1, 5}, "aab"}]},
+     {"abaab aa b", [{t, {1, 1}, "ab"}, {t, {1, 3}, "aab"}, {t, {1, 7}, "a"},
+                     {t, {1, 8}, "a"}, {t, {1, 10}, "b"}]},
+     {"bbaaaaaaaaaa", [{t, {1, 1}, "b"}, {t, {1, 2}, "b"}
+                       | [ {t, {1, C}, "a"} || C <- lists:seq(3, 12) ]]},
+     {"", []}].
+
+backtrack_byte_by_byte_test_() ->
+    [ {lists:flatten(io_lib:format("~p ~p", [Text, Enc])),
+       fun() ->
+               {Result, Calls, Size} = lex_byte_by_byte(Text, Enc),
+               ?assertEqual(Expected, Result),
+               %% every byte was fetched exactly once, then one ended:
+               %% backtracking reuses the fragments it has
+               ?assertEqual(Size + 1, Calls),
+               ?assertEqual(Expected, pull_byte_by_byte(Text, Enc))
+       end}
+      || {Text, Expected} <- ab_cases(), Enc <- [bytes | ?ENCODINGS] ].
+
+%% Errors after backtracking: "aa" is lexed as two "a" tokens, then "c"
+%% matches nothing, at column 4; a UTF-8 "a" cut short is incomplete.
+backtrack_byte_by_byte_errors_test_() ->
+    [?_assertMatch({{'EXIT', {lex_no_match, {line, 1}, {column, 4}}}, _, _},
+                   lex_byte_by_byte("aa c", Enc))
+     || Enc <- [bytes | ?ENCODINGS]] ++
+    [?_assertEqual({'EXIT', {lex_bad_encoding, {utf32, big}, incomplete, {line, 1}, {column, 3},
+                             {bytes, [0, 0]}}},
+                   caught(fun() ->
+                                  Bin = <<(encode_for({utf32, big}, "aa"))/binary, 0, 0>>,
+                                  lex:with(ab_rules(), <<>>, byte_by_byte(Bin, counters:new(1, [])),
+                                           [{encoding, {utf32, big}}])
+                          end))].
+
+%% Random strings of a, b and spaces, 1 byte at a time, give the same
+%% result as lexing them whole
+backtrack_byte_by_byte_random_test_() ->
+    {timeout, 120,
+     fun() ->
+             rand:seed(exsss, {27, 18, 28}),
+             [ begin
+                   Text = [ lists:nth(rand:uniform(4), "aab ") || _ <- lists:seq(1, rand:uniform(40)) ],
+                   Whole = caught(fun() -> lex:with(ab_rules(), encode_for(Enc, Text), [{encoding, Enc}]) end),
+                   {Result, Calls, Size} = lex_byte_by_byte(Text, Enc),
+                   ?assertEqual({Text, Enc, Whole}, {Text, Enc, Result}),
+                   ?assertEqual({Text, Enc, Size + 1}, {Text, Enc, Calls})
+               end || Enc <- [bytes | ?ENCODINGS], _ <- lists:seq(1, 200) ]
+     end}.
