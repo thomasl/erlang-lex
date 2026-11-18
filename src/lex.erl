@@ -93,6 +93,16 @@
     with/3,
     with/4
    ]).
+
+%% non-blocking incremental lexing
+-export(
+   [start/1,
+    feed/2,
+    next/1,
+    tokens/1,
+    rest/1,
+    position/1
+   ]).
 -export([o_with/2,
 	 regexps_to_table/1,
 	 regexps_to_table/2,
@@ -796,143 +806,229 @@ io_take(Bad, _Stack, _K, Acc) ->
 %%
 %% Incremental driver
 %%
-%% Lexes a stream of data that arrives in chunks, e.g. from a socket.
-%% When the lexer runs out of data, it calls More(), which returns
+%% Lexes a stream of data that arrives in chunks, e.g. from a socket. The
+%% core does not block: it is a continuation that the caller feeds with
+%% data as it arrives, and asks for tokens.
 %%
-%%   {more, Data, Cont}  Data is the next chunk, and Cont the function to
-%%                       call when that runs out too; more may follow
-%%   {last, Data}        Data is the last chunk
-%%   ended               there is no more data
+%%   start(LEX) -> Cont
+%%   feed(Cont, Data) -> Cont          Data is iodata, may be empty
+%%   feed(Cont, eof) -> Cont           no more data will come
+%%   next(Cont) -> {token, T, Cont} | {more, Cont} | end_of_stream
+%%   tokens(Cont) -> {more, [T], Cont} | {done, [T]}
+%%   rest(Cont) -> iodata              the data not yet lexed
+%%   position(Cont) -> {Line, Column}  where the next token starts
 %%
-%% Data is iodata. The lexer never calls a function again after it has
-%% returned {last, Data} or ended.
+%% next/1 returns {more, Cont} when it needs data that has not been fed
+%% yet; feed the next chunk (or eof) and call next/1 again. This suits a
+%% gen_server that gets data as messages ({tcp, Socket, Data}).
+%%
+%% The blocking interface, with a function More() that the lexer calls
+%% for data, is built on the core:
 %%
 %%   one(LEX, Data, More) -> {token, T, Rest, More1} | end_of_stream
-%%     Rest is the data fetched but not yet lexed (iodata), More1 the
-%%     function to call when that runs out: pass both to the next call.
 %%   with(Rules, Data, More, Opts) -> [T]
 %%
-%% This is the iolist driver, with one difference: when io_scan/10 gets
-%% to the end of the data, the scan has not failed yet. If More gives
-%% more data, the scan resumes with the same state where it stopped, so
-%% a token (or a UTF-8 character) can span chunks. The token start
-%% cursor is extended with each new chunk, so that the rest after the
-%% token, and the bytes of a failed token for error reports, can still
-%% be found. (Backtracking may thus also cross chunks.)
+%% More() returns {more, Data, Cont} (Cont is called next time),
+%% {last, Data} or ended; it is never called again after the last two.
+%%
+%% How it works: this is the iolist driver, with one difference. When
+%% io_scan/10 gets to the end of the data, the scan has not failed yet:
+%% its state is kept in the continuation, and when data is fed, the scan
+%% resumes where it stopped, so a token (or a UTF-8 character) can span
+%% chunks. The cursor at the start of the token is extended with each
+%% chunk, so that the rest after the token, and the bytes of a failed
+%% token for error reports, can still be found; backtracking can thus
+%% also cross chunks. Chunks fed during a token are kept in reverse
+%% (tail) and joined once per token, so feeding is O(1).
 %%
 %% By the longest-match rule a token that is complete at the end of the
-%% data may still grow, so the lexer must call More() before returning it
-%% (and More() may block). Not if the DFA state at the end of the token
-%% has no transitions at all: then no more data can extend it, and the
-%% token is returned at once, without calling More(). That way e.g. ";"
-%% or ")" at the end of a line typed by a user are returned right away.
+%% data may still grow, so next/1 asks for more data before returning it.
+%% Not if the DFA state at the end of the token has no transitions at
+%% all: then no data can extend it, and the token is returned at once.
+%% That way e.g. ";" or ")" at the end of a line are returned right away.
 %%
-%% When lexing fails in a Unicode encoding, the error report needs the
-%% bytes after the failure to tell an invalid character from one that is
-%% merely incomplete so far, so the lexer then fetches up to 4 more bytes
-%% (see inc_fill/5).
+%% When lexing fails in a Unicode encoding, the error report needs the 4
+%% bytes after the failure (the longest character) to tell an invalid
+%% character from one that is merely incomplete so far. Until they have
+%% been fed (or eof), next/1 returns {more, Cont}, then it exits with the
+%% error.
+%%
+%% Positions: each continuation has its own position, so one process can
+%% lex several streams at once (e.g. a gen_server with many
+%% connections). next/1 puts it in the process dictionary while it runs,
+%% so that actions can use current_line/0 etc. as usual.
 
-one(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL}, Data, More)
-  when is_function(More, 0) ->
-    try inc_longest(LEX, Data, [], More) of
-	{token, T, {Cur, Stack}, More1} ->
-	    {token, T, io_join(Cur, Stack), More1};
+-record(lexc,
+	{lex,			% the lex table
+	 cur = [],		% cursor at the start of the token: Cur and
+	 stack = [],		% Stack, followed by
+	 tail = [],		% the chunks fed since, reversed
+	 scan = none,		% none, or the suspended scan:
+				%   {State, N, RevAcc, LastState, LastLen, LastRevAcc}
+	 new = [],		% chunks fed since the scan was suspended, reversed
+	 ended = false,		% true when eof has been fed
+	 fail = none,		% none, or Len of a failed token whose error
+				% report waits for more bytes
+	 pos = {1, 1, false}	% {Line, Column, AfterCR}
+	}).
+
+start(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, _Enc, _NL}) ->
+    #lexc{lex = LEX}.
+
+feed(#lexc{ended = true}, _Data) ->
+    exit(lex_feed_after_eof);
+feed(C, eof) ->
+    C#lexc{ended = true};
+feed(C = #lexc{scan = none, tail = Tail}, Data) ->
+    C#lexc{tail = [Data | Tail]};
+feed(C = #lexc{tail = Tail, new = New}, Data) ->
+    C#lexc{tail = [Data | Tail], new = [Data | New]}.
+
+rest(#lexc{cur = Cur, stack = Stack, tail = Tail}) ->
+    io_join(Cur, Stack ++ lists:reverse(Tail)).
+
+position(#lexc{pos = {Line, Col, _AfterCR}}) ->
+    {Line, Col}.
+
+next(C = #lexc{pos = Pos}) ->
+    put(?pos_key, Pos),
+    case next1(C) of
+	{token, T, C1} ->
+	    {token, T, C1#lexc{pos = position()}};
+	{more, C1} ->
+	    {more, C1#lexc{pos = position()}};
 	end_of_stream ->
 	    end_of_stream
-    catch
-	throw:{?MODULE, io_no_match, Cur, Stack, Len} ->
-	    io_report_no_match(Enc, NL, Cur, Stack, Len)
     end.
 
-with(Regexp_rules, Data, More, Opts) when is_function(More, 0) ->
-    LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL} =
-	regexps_to_table(Regexp_rules, Opts),
-    no_lines(),
-    try lex_more(LEX, Data, [], More, [])
-    catch
-	throw:{?MODULE, io_no_match, Cur, Stack, Len} ->
-	    io_report_no_match(Enc, NL, Cur, Stack, Len)
+tokens(C) ->
+    tokens(C, []).
+
+tokens(C, Acc) ->
+    case next(C) of
+	{token, T, C1} -> tokens(C1, [T|Acc]);
+	{more, C1} -> {more, lists:reverse(Acc), C1};
+	end_of_stream -> {done, lists:reverse(Acc)}
     end.
 
-lex_more(LEX, Cur, Stack, More, Acc) ->
-    case inc_longest(LEX, Cur, Stack, More) of
-	{token, T, {Cur1, Stack1}, More1} ->
-	    lex_more(LEX, Cur1, Stack1, More1, [T|Acc]);
-	end_of_stream ->
-	    lists:reverse(Acc)
-    end.
+%% next1/1 runs with the position in the process dictionary
 
-%% Find the next token, skipping no_token matches. Returns
-%% {token, T, {Cur, Stack}, More} or end_of_stream.
+next1(C = #lexc{fail = Len}) when Len =/= none ->
+    check_fail(C);
+next1(C = #lexc{lex = {lex, Start, AcceptLimit, Table, _, _, _},
+		cur = Cur, stack = Stack, tail = Tail, scan = none}) ->
+    %% a new token: scan from its start, through all the data
+    Stack1 = Stack ++ lists:reverse(Tail),
+    C1 = C#lexc{stack = Stack1, tail = []},
+    scanned(C1, io_scan(Cur, Stack1, Start, Table, AcceptLimit, 0, [], 0, 0, []));
+next1(C = #lexc{lex = {lex, _Start, AcceptLimit, Table, _, _, _},
+		scan = {State, N, RevAcc, LastState, LastLen, LastRevAcc}, new = New}) ->
+    %% resume the scan with the chunks fed since it stopped
+    C1 = C#lexc{scan = none, new = []},
+    scanned(C1, io_scan(lists:reverse(New), [], State, Table, AcceptLimit,
+			N, RevAcc, LastState, LastLen, LastRevAcc)).
 
-inc_longest(LEX = {lex, Start, _AcceptLimit, _Table, _Actions, _Enc, _NL}, Cur, Stack, More) ->
-    inc_scan(LEX, Cur, Stack, Cur, Stack, Start, 0, [], 0, 0, [], More).
+scanned(C = #lexc{lex = {lex, _Start, _AcceptLimit, Table, _, _, _}, ended = Ended},
+	{eof, State, N, RevAcc, LastState, LastLen, LastRevAcc} = Eof) ->
+    case Ended orelse (LastLen == N andalso N > 0 andalso dead_state(State, Table)) of
+	true ->
+	    %% the end of the stream, or a token that cannot grow
+	    finish(C, io_eof(Eof));
+	false ->
+	    {more, C#lexc{scan = {State, N, RevAcc, LastState, LastLen, LastRevAcc}}}
+    end;
+scanned(C, Result) ->
+    finish(C, Result).
 
-%% TokCur, TokStack: the cursor at the start of the token, extended with
-%% the chunks fetched since; Cur, Stack: where the scan is.
-
-inc_scan(LEX = {lex, _Start, AcceptLimit, Table, _Actions, _Enc, _NL},
-	 TokCur, TokStack, Cur, Stack, State, N, RevAcc, LastState, LastLen, LastRevAcc, More) ->
-    case io_scan(Cur, Stack, State, Table, AcceptLimit, N, RevAcc,
-		 LastState, LastLen, LastRevAcc) of
-	{eof, State1, N1, RevAcc1, LastState1, LastLen1, LastRevAcc1} = Eof ->
-	    case LastLen1 == N1 andalso N1 > 0 andalso dead_state(State1, Table) of
-		true ->
-		    %% the token cannot grow: no need for more data
-		    inc_done(LEX, TokCur, TokStack, io_eof(Eof), More);
-		false ->
-		    case next_data(More) of
-			{Data, More1} ->
-			    inc_scan(LEX, TokCur, TokStack ++ [Data], Data, [],
-				     State1, N1, RevAcc1, LastState1, LastLen1, LastRevAcc1,
-				     More1);
-			no_more ->
-			    inc_done(LEX, TokCur, TokStack, io_eof(Eof), fun no_more/0)
-		    end
-	    end;
-	Result ->
-	    inc_done(LEX, TokCur, TokStack, Result, More)
-    end.
-
-inc_done(LEX = {lex, _Start, _AcceptLimit, _Table, Actions, _Enc, _NL},
-	 TokCur, TokStack, Result, More) ->
+finish(C = #lexc{lex = {lex, _Start, _AcceptLimit, _Table, Actions, _, _},
+		 cur = Cur, stack = Stack, tail = Tail}, Result) ->
     case Result of
 	{accept, State, Len, RevAcc} ->
-	    {Cur1, Stack1} = io_skip(TokCur, TokStack, Len),
+	    {Cur1, Stack1} = io_skip(Cur, Stack ++ lists:reverse(Tail), Len),
+	    C1 = C#lexc{cur = Cur1, stack = Stack1, tail = []},
 	    case emit_token(Actions, State, RevAcc) of
 		no_token ->
-		    inc_longest(LEX, Cur1, Stack1, More);
+		    next1(C1);
 		{token, T} ->
-		    {token, T, {Cur1, Stack1}, More}
+		    {token, T, C1}
 	    end;
 	{fail, 0, at_end} ->
 	    end_of_stream;
 	{fail, Len, _} ->
-	    TokStack1 = inc_fill(LEX, TokCur, TokStack, Len + 4, More),
-	    throw({?MODULE, io_no_match, TokCur, TokStack1, Len})
+	    check_fail(C#lexc{fail = Len})
     end.
 
-%% Before reporting a failed token of Len bytes: in the Unicode encodings,
-%% make sure the 4 bytes after it (the longest character) have been
-%% fetched, or the stream has ended, or an element that is not a byte
-%% has been met, so that report_no_match/4 sees what the character
-%% there is. Returns the extended token Stack.
+%% A token of Len bytes failed. In the Unicode encodings, the error may
+%% be a malformed character at or before the failing byte; with the bytes
+%% fed so far, such a character may look incomplete, which more data can
+%% turn into invalid (or show to be fine). So while it looks incomplete
+%% and the stream has not ended, ask for more; otherwise report.
 
-inc_fill({lex, _Start, _AcceptLimit, _Table, _Actions, Enc, _NL}, _Cur, Stack, _Need, _More)
-  when Enc == bytes; Enc == latin1 ->
-    Stack;
-inc_fill(LEX, Cur, Stack, Need, More) ->
-    Have = io_take(Cur, Stack, Need, []),
-    Enough = length(Have) >= Need
-	orelse lists:any(fun(B) -> not (is_integer(B) andalso B >= 0 andalso B =< 255) end, Have),
-    case Enough of
+check_fail(C = #lexc{lex = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL},
+		     cur = Cur, stack = Stack, tail = Tail, ended = Ended, fail = Len}) ->
+    Stack1 = Stack ++ lists:reverse(Tail),
+    case Ended orelse not looks_incomplete(Enc, Cur, Stack1, Len) of
 	true ->
-	    Stack;
+	    io_report_no_match(Enc, NL, Cur, Stack1, Len);
 	false ->
+	    {more, C#lexc{stack = Stack1, tail = []}}
+    end.
+
+%% A character that starts at or before byte Len is at most 4 bytes long,
+%% so Len + 4 bytes are enough to decide it.
+
+looks_incomplete(Enc, _Cur, _Stack, _Len) when Enc == bytes; Enc == latin1 ->
+    false;
+looks_incomplete(Enc, Cur, Stack, Len) ->
+    Bytes = io_take(Cur, Stack, Len + 4, []),
+    case lex_unicode:first_error(Enc, Bytes, Len) of
+	{incomplete, _Offset, _Bad} -> true;
+	_ -> false
+    end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% The blocking interface: a function More() is called for data
+
+one(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, _Enc, _NL}, Data, More)
+  when is_function(More, 0) ->
+    %% continue from the position in the process dictionary, as one/2
+    C = feed(#lexc{lex = LEX, pos = position()}, Data),
+    case drive(C, More) of
+	{token, T, C1, More1} ->
+	    {token, T, rest(C1), More1};
+	end_of_stream ->
+	    end_of_stream
+    end.
+
+with(Regexp_rules, Data, More, Opts) when is_function(More, 0) ->
+    LEX = regexps_to_table(Regexp_rules, Opts),
+    no_lines(),
+    lex_more(feed(start(LEX), Data), More, []).
+
+lex_more(C, More, Acc) ->
+    case drive(C, More) of
+	{token, T, C1, More1} ->
+	    lex_more(C1, More1, [T|Acc]);
+	end_of_stream ->
+	    lists:reverse(Acc)
+    end.
+
+%% Get the next token, calling More() for data when it is needed.
+%% Returns {token, T, Cont, More} or end_of_stream.
+
+drive(C, More) ->
+    case next(C) of
+	{token, T, C1} ->
+	    {token, T, C1, More};
+	{more, C1} ->
 	    case next_data(More) of
-		{Data, More1} -> inc_fill(LEX, Cur, Stack ++ [Data], Need, More1);
-		no_more -> Stack
-	    end
+		{Data, More1} ->
+		    drive(feed(C1, Data), More1);
+		no_more ->
+		    drive(feed(C1, eof), fun no_more/0)
+	    end;
+	end_of_stream ->
+	    end_of_stream
     end.
 
 %% Call More() for the next chunk: {Data, NextMore} or no_more.

@@ -946,3 +946,149 @@ backtrack_byte_by_byte_random_test_() ->
                    ?assertEqual({Text, Enc, Size + 1}, {Text, Enc, Calls})
                end || Enc <- [bytes | ?ENCODINGS], _ <- lists:seq(1, 200) ]
      end}.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% The non-blocking incremental interface: start/1, feed/2, next/1
+
+%% Feed Chunks, sometimes several before asking, and collect tokens with
+%% next/1 (or tokens/1) until end_of_stream.
+feed_all(Lex, Chunks) ->
+    feed_all(lex:start(Lex), Chunks, []).
+
+feed_all(C, Chunks, Acc) ->
+    case lex:next(C) of
+        {token, T, C1} ->
+            feed_all(C1, Chunks, [T | Acc]);
+        end_of_stream ->
+            [] = Chunks,
+            lists:reverse(Acc);
+        {more, C1} ->
+            case Chunks of
+                [] ->
+                    feed_all(lex:feed(C1, eof), [], Acc);
+                _ ->
+                    %% feed 1-3 chunks at once
+                    {Now, Later} = lists:split(min(rand:uniform(3), length(Chunks)), Chunks),
+                    C2 = lists:foldl(fun(D, Ci) -> lex:feed(Ci, D) end, C1, Now),
+                    case rand:uniform(2) of
+                        1 -> feed_all(C2, Later, Acc);
+                        2 -> case lex:tokens(C2) of
+                                 {more, Ts, C3} -> feed_all(C3, Later, lists:reverse(Ts, Acc));
+                                 {done, Ts} -> [] = Later, lists:reverse(Acc, Ts)
+                             end
+                    end
+            end
+    end.
+
+continuation_equivalence_test_() ->
+    {timeout, 120,
+     fun() ->
+             rand:seed(exsss, {16, 18, 0}),
+             [ begin
+                   Rules = driver_rules(Enc),
+                   Opts = [{encoding, Enc}],
+                   Bin = random_input(Enc),
+                   Whole = caught(fun() -> lex:with(Rules, Bin, Opts) end),
+                   Chunks = random_chunks(Bin),
+                   Lex = lex:regexps_to_table(Rules, Opts),
+                   Fed = caught(fun() -> feed_all(Lex, Chunks) end),
+                   ?assertEqual({Enc, Bin, Chunks, Whole}, {Enc, Bin, Chunks, Fed})
+               end || Enc <- [bytes, latin1 | ?ENCODINGS], _ <- lists:seq(1, 500) ]
+     end}.
+
+continuation_test_() ->
+    Rules = [{regexp, "\\p{L}+", at(w)}, {regexp, ";", at(semi)}, {regexp, "\\s+", lex:whitespace()}],
+    Lex = lex:regexps_to_table(Rules, [{encoding, utf8}]),
+    S = lex:start(Lex),
+    [%% nothing fed yet
+     ?_assertMatch({more, _}, lex:next(S)),
+     ?_assertEqual(end_of_stream, lex:next(lex:feed(S, eof))),
+     %% "a" might grow, ";" cannot
+     ?_test(begin
+                {token, {w, {1, 1}, "a"}, C1} = lex:next(lex:feed(S, <<"a;">>)),
+                {token, {semi, {1, 2}, ";"}, C2} = lex:next(C1),
+                ?assertMatch({more, _}, lex:next(C2)),
+                ?assertEqual({1, 3}, lex:position(C2))
+            end),
+     ?_test(begin
+                {more, C1} = lex:next(lex:feed(S, <<"ab">>)),
+                ?assertEqual(<<"ab">>, iolist_to_binary(lex:rest(C1))),
+                {more, C2} = lex:next(lex:feed(C1, <<"c">>)),
+                {token, {w, {1, 1}, "abc"}, C3} = lex:next(lex:feed(C2, <<" d">>)),
+                ?assertEqual(<<" d">>, iolist_to_binary(lex:rest(C3))),
+                ?assertEqual({done, [{w, {1, 5}, "d"}]}, lex:tokens(lex:feed(C3, eof)))
+            end),
+     %% a bad character at the end of the data: the error waits for the
+     %% next bytes to tell invalid from incomplete
+     ?_test(begin
+                {token, {w, {1, 1}, "ab"}, C0} = lex:next(lex:feed(S, <<"ab ", 16#D8>>)),
+                {more, C1} = lex:next(C0),
+                ?assertEqual({'EXIT', {lex_bad_encoding, utf8, invalid, {line, 1}, {column, 4},
+                                       {bytes, [16#D8, 0]}}},
+                             caught(fun() -> lex:next(lex:feed(C1, <<0>>)) end)),
+                {token, _, C20} = lex:next(lex:feed(S, <<"ab ", 16#D8>>)),
+                {more, C2} = lex:next(C20),
+                ?assertEqual({'EXIT', {lex_bad_encoding, utf8, incomplete, {line, 1}, {column, 4},
+                                       {bytes, [16#D8]}}},
+                             caught(fun() -> lex:next(lex:feed(C2, eof)) end))
+            end),
+     ?_assertEqual({'EXIT', lex_feed_after_eof},
+                   caught(fun() -> lex:feed(lex:feed(S, eof), <<"a">>) end))].
+
+%% Two streams lexed in one process, interleaved: each continuation has
+%% its own position
+interleaved_streams_test() ->
+    Rules = [{regexp, "\\p{L}+", at(w)}, {regexp, "\\s+", lex:whitespace()}],
+    Lex = lex:regexps_to_table(Rules, [{encoding, utf8}]),
+    A = [<<"one\ntw">>, <<"o three">>, <<"\n\nfour">>],
+    B = [<<"x y">>, <<" z\n">>, <<"\nw">>],
+    Alone = fun(Chunks) -> lex:with(Rules, iolist_to_binary(Chunks), [{encoding, utf8}]) end,
+    Interleaved = interleave(lex:start(Lex), A, [], lex:start(Lex), B, []),
+    ?assertEqual({Alone(A), Alone(B)}, Interleaved).
+
+interleave(CA, [], AccA, CB, [], AccB) ->
+    {done, TA} = lex:tokens(lex:feed(CA, eof)),
+    {done, TB} = lex:tokens(lex:feed(CB, eof)),
+    {AccA ++ TA, AccB ++ TB};
+interleave(CA, A, AccA, CB, B, AccB) ->
+    {more, TA, CA1} = lex:tokens(feed_some(CA, A)),
+    {more, TB, CB1} = lex:tokens(feed_some(CB, B)),
+    interleave(CA1, tl_or_nil(A), AccA ++ TA, CB1, tl_or_nil(B), AccB ++ TB).
+
+feed_some(C, []) -> C;
+feed_some(C, [D | _]) -> lex:feed(C, D).
+tl_or_nil([]) -> [];
+tl_or_nil([_ | T]) -> T.
+
+%% The use the non-blocking interface is for: a process that gets the
+%% data of an active socket as messages, as a gen_server would
+active_socket_test() ->
+    {ok, L} = gen_tcp:listen(0, [binary, {active, false}, {ip, loopback}]),
+    {ok, Port} = inet:port(L),
+    Writes = [<<"hello wo">>, <<"rld; ">>, <<"λ"/utf8, 16#CE>>, <<16#BC, ";\n">>, <<"x">>],
+    spawn_link(fun() ->
+                       {ok, S} = gen_tcp:connect({127, 0, 0, 1}, Port, [binary]),
+                       [ begin ok = gen_tcp:send(S, W), timer:sleep(20) end || W <- Writes ],
+                       ok = gen_tcp:close(S)
+               end),
+    {ok, Sock} = gen_tcp:accept(L, 5000),
+    ok = inet:setopts(Sock, [{active, true}]),
+    Rules = [{regexp, "\\p{L}+", at(w)}, {regexp, ";", at(semi)}, {regexp, "\\s+", lex:whitespace()}],
+    Lex = lex:regexps_to_table(Rules, [{encoding, utf8}]),
+    Tokens = socket_loop(Sock, lex:start(Lex), []),
+    gen_tcp:close(L),
+    ?assertEqual([{w, {1, 1}, "hello"}, {w, {1, 7}, "world"}, {semi, {1, 12}, ";"},
+                  {w, {1, 14}, "λμ"}, {semi, {1, 16}, ";"}, {w, {2, 1}, "x"}],
+                 Tokens).
+
+socket_loop(Sock, C, Acc) ->
+    receive
+        {tcp, Sock, Data} ->
+            {more, Ts, C1} = lex:tokens(lex:feed(C, Data)),
+            socket_loop(Sock, C1, Acc ++ Ts);
+        {tcp_closed, Sock} ->
+            {done, Ts} = lex:tokens(lex:feed(C, eof)),
+            Acc ++ Ts
+    after 5000 ->
+            error(timeout)
+    end.

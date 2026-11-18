@@ -174,12 +174,17 @@ continues from the current position and does not reset it: call
 `no_lines()` before lexing a new input.
 
 ```erlang
+start(LexTable) -> Cont
+feed(Cont, Data | eof) -> Cont
+next(Cont) -> {token, Token, Cont} | {more, Cont} | end_of_stream
+tokens(Cont) -> {more, [Token], Cont} | {done, [Token]}
 one(LexTable, Data, More) -> {token, Token, Rest, More1} | end_of_stream
 with(Rules, Data, More, Options) -> [Token]
 ```
 
-Lex a stream that arrives in chunks: when the data runs out, the lexer
-calls `More()` for the next chunk. See
+Lex a stream that arrives in chunks, either by feeding the chunks to a
+continuation as they arrive (non-blocking), or by giving a function
+`More()` that the lexer calls for the next chunk. See
 [Incremental input](#incremental-input).
 
 ```erlang
@@ -271,7 +276,49 @@ the same effect on garbage collection as a single binary does.
 ### Incremental input
 
 For data that arrives in chunks, e.g. from a socket or a file read a
-piece at a time, pass the data you have and a function `More`:
+piece at a time, there are two interfaces: a non-blocking one, where you
+feed the lexer the chunks as they arrive, and one where the lexer calls a
+function for the next chunk.
+
+**Non-blocking.** A continuation holds the lexer's state between chunks:
+
+| Function | |
+|---|---|
+| `start(LexTable)` | a new continuation, at line 1, column 1 |
+| `feed(Cont, Data)` | add a chunk (iodata, may be empty) |
+| `feed(Cont, eof)` | the stream has ended; feeding more exits with `lex_feed_after_eof` |
+| `next(Cont)` | `{token, Token, Cont1}`, or `{more, Cont1}` when it needs data that has not been fed yet, or `end_of_stream` |
+| `tokens(Cont)` | all the tokens it can get now: `{more, Tokens, Cont1}` (feed more, then continue) or `{done, Tokens}` |
+| `rest(Cont)` | the data fed but not yet lexed, as iodata |
+| `position(Cont)` | `{Line, Column}` where the next token starts |
+
+`next/1` never blocks, so the lexer fits a process that gets its data as
+messages, such as a `gen_server` with an active socket:
+
+```erlang
+init(Socket) ->
+    ok = inet:setopts(Socket, [{active, true}]),
+    {ok, #state{socket = Socket, lex = lex:start(LexTable)}}.
+
+handle_info({tcp, _Socket, Data}, State = #state{lex = C}) ->
+    {more, Tokens, C1} = lex:tokens(lex:feed(C, Data)),
+    handle_tokens(Tokens),
+    {noreply, State#state{lex = C1}};
+handle_info({tcp_closed, _Socket}, State = #state{lex = C}) ->
+    {done, Tokens} = lex:tokens(lex:feed(C, eof)),
+    handle_tokens(Tokens),
+    {stop, normal, State}.
+```
+
+(The tests run this loop on a real socket, in `active_socket_test`.)
+
+Each continuation keeps its own line and column, so one process can lex
+several streams at once, e.g. one per connection; `next/1` puts the
+position in the process dictionary while it runs, so actions use
+`current_line()` etc. as usual.
+
+**With a function for more data.** Pass the data you have and a function
+`More`:
 
 ```erlang
 lex:with(Rules, Data, More, Options) -> [Token]
@@ -293,6 +340,9 @@ or `ended` the lexer never calls a function again. `Data` may be empty.
 function to call when that runs out, `More1`; pass both to the next call
 (after the stream has ended, `More1` just returns `ended`). As with
 `one/2`, call `no_lines()` before a new stream; `with/4` does that.
+
+`More()` may block (e.g. in `gen_tcp:recv/2`); this interface is built on
+the non-blocking one, calling `More()` whenever `next/1` asks for more.
 
 Reading a socket:
 
@@ -322,28 +372,28 @@ from_file(Name) ->
     end.
 ```
 
-**When `More()` is called.** Only when the lexer has no data left. That
-may be in the middle of a token, or of a character: the lexer resumes
-where it stopped, so tokens, UTF-8 characters and the backtracking of
-longest match can all span chunks, and give exactly the same tokens,
-positions and errors as lexing the whole input at once (the tests check
-this on tens of thousands of random splits).
+**When more data is needed** (`next/1` returns `{more, Cont}`, or the
+lexer calls `More()`). Only when the lexer has no data left. That may be
+in the middle of a token, or of a character: the lexer resumes where it
+stopped, so tokens, UTF-8 characters and the backtracking of longest
+match can all span chunks, and give exactly the same tokens, positions
+and errors as lexing the whole input at once (the tests check this on
+tens of thousands of random splits, down to 1 byte per chunk).
 
 By the longest-match rule, a token that is complete at the end of the
-available data might still continue in the next chunk, so the lexer
-calls `More()` before returning it, and `More()` may block (e.g. in
-`gen_tcp:recv/2`). With an interactive source, a word or a number at the
-end of a line is therefore returned when the next data arrives (or the
-stream ends). There is one exception: if no further byte can extend the
-token (its DFA state has no transitions), as for `;` or `)`, the token is
-returned at once, without calling `More()`. Ending lines with a newline
-token rule (e.g. `{regexp, "\n", ...}`) also helps, since a newline is
+available data might still continue in the next chunk, so the lexer asks
+for more data before returning it. With an interactive source, a word or
+a number at the end of a line is therefore returned when the next data
+arrives (or the stream ends). There is one exception: if no further byte
+can extend the token (its DFA state has no transitions), as for `;` or
+`)`, the token is returned at once. Ending lines with a newline token
+rule (e.g. `{regexp, "\n", ...}`) also helps, since a newline is
 usually one of those.
 
-When lexing fails in a Unicode encoding, telling an invalid character
-from one that is only incomplete so far needs the bytes after it, so the
-lexer fetches up to 4 more bytes with `More()` before reporting the
-error.
+When lexing fails in a Unicode encoding at a character that looks
+incomplete so far, whether it is invalid or merely incomplete depends on
+the bytes after it, so the lexer asks for more data (up to 4 bytes)
+before reporting the error.
 
 The incremental driver does not adjust the garbage collection settings
 (see [Binary input](#binary-input)), since it does not know the size of
@@ -425,8 +475,10 @@ comments) are counted correctly by the lexer.
 | `count_lines(Text)` | the number of line breaks in `Text` by the `ascii` rules (correct for both bytes and code points) |
 | `count_lines(Text, NL)` | the same with `NL` = `unicode`, `ascii` or `lf` |
 
-The position is kept in the process dictionary, so it belongs to the
-process: two lexers interleaved in one process share it.
+The position is kept in the process dictionary, so with `with/2,3`,
+`one/2,3` it belongs to the process: two such lexers interleaved in one
+process share it. The non-blocking interface keeps a position per stream
+(see [Incremental input](#incremental-input)).
 
 ### Other utilities
 
@@ -995,12 +1047,9 @@ Syntax and semantics of the classes:
 - **Large binaries and garbage collection**: `with/2,3` adjusts the
   process's GC settings while it lexes a binary, see
   [Binary input](#binary-input); with `one/2` that is up to the caller.
-- **Incremental input** works by calling a function for more data
-  ([Incremental input](#incremental-input)), which may block: the lexer
-  cannot return "need more data" to a caller that wants to wait for it
-  some other way, such as an `active` socket's messages in a
-  `gen_server`. Future work: return a continuation instead. Also, a
-  token that could still grow is only returned when more data arrives.
+- **Incremental input**: a token that could still grow is only returned
+  when more data arrives (or the stream ends), as longest match
+  requires; see [Incremental input](#incremental-input).
 - **No match** stops lexing with an exception; there is no built-in
   recovery (`lex`/`flex` echo and skip the character). Add a catch-all
   rule if needed.
@@ -1008,8 +1057,9 @@ Syntax and semantics of the classes:
   bytes in `bytes` mode). There is no byte offset, and columns do not
   account for tab stops, display width (wide CJK characters, combining
   marks) or the UTF-16 code units that some editors and the Language
-  Server Protocol use. The position is kept in the process dictionary,
-  so it is per process; future work: keep it in the lexer state.
+  Server Protocol use. Except in the non-blocking incremental interface
+  (one position per continuation), the position is kept in the process
+  dictionary, so it is per process; actions always read it from there.
 - **Table size.** Every state is a 256-element tuple. Sparse tables,
   equivalence classes of bytes (as in `flex`), or generating Erlang code
   from the DFA (as `leex` does) would make large and little-endian
