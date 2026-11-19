@@ -857,6 +857,8 @@ io_scan_table(Cur, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastL
 %% The next state of State on byte C, in a table of Bits-bit entries:
 %% binds Next to an unsigned integer, 0 for no match (a macro, so that
 %% Bits is a literal in the pattern).
+%% Big-endian, so the table is the same on every machine; native byte
+%% order was no faster (see doc/README.md, "Table representation").
 -define(bin_next(Next, State, C, Table, Bits),
 	<<_:(((State - 1) bsl 8) bor C)/binary-unit:Bits,
 	  Next:Bits/integer-unsigned-big, _/binary>> = Table).

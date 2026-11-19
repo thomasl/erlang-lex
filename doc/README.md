@@ -1037,6 +1037,25 @@ every width, so 8-bit entries only save space. `binary:at/2`, which
 allocates nothing, was slower still in a micro-benchmark. Inlining the
 lookup made no difference.
 
+The entries are big-endian (`integer-unsigned-big`), so a table has
+the same bytes on every machine and can be stored with `term_to_binary`
+or sent to another node. `native` byte order was also tried, on this
+little-endian Apple M4. The BEAM code was identical except for one flag
+on the instruction that reads the entry. In the lexer, the difference
+was within 1% (run-to-run noise is about 3%):
+
+| Lex with a 16-bit table (ms) | big | native |
+|---|---|---|
+| `bytes`: binary / string / iolist | 46 / 46-47 / 84-85 | 47 / 47-48 / 83-85 |
+| `utf8`: binary / string / iolist | 51 / 50-51 / 114-118 | 52 / 51-52 / 114-117 |
+
+32-bit tables gave the same picture. In a micro-benchmark of 20 million
+chained lookups alone, the difference went both ways: `big` was about
+10% faster at 16 bits, and `native` 15-20% faster at 32 bits. These
+results also depended on the order the variants ran in. Since `native`
+gains nothing in the lexer and would make tables differ between
+machines, the entries stay big-endian. 8-bit entries have no byte order.
+
 So `tuple` stays the default. `binary` pays off when one table is
 shared by many processes or stored, where it saves memory and copying.
 A tuple table can also avoid being copied by keeping it in
