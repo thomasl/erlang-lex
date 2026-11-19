@@ -81,6 +81,9 @@
 	 count_lines/2
 	]).
 
+%% The DFA table, independent of its representation (for tests and tools)
+-export([transition/3]).
+
 %% ?max_char is currently used to decide the "charset size"
 %% we permit characters 0-?maxchar (excepting ?no_match,)
 %%
@@ -99,17 +102,35 @@
 
 -define(pos_key, lex_position).
 
-%% ?no_match is a reserved state indicating error/no match possible
-%%
-%% - when the table is represented as a tuple of tuples, we can have
-%%   ?no_match = -1
-%% - if the table is a binary, we would like to fit all characters into
-%%   an unsigned byte ... in that case, ?no_match can't be -1. Not sure
-%%   what it should be. (255?)
+%% ?no_match is a reserved state indicating error/no match possible.
+%% Both table representations (below) store it as -1.
 
 -define(no_match, -1).
 
 %% For compact tables, the value must be unsigned (which is a drawback).
+
+%% Table representation, chosen at compile time (an experiment, see
+%% doc/README.md, "Table representation"):
+%%
+%% - default: a tuple of rows, one per state; each row is a tuple of 256
+%%   next states. ?next(State, Byte, Table) is two element/2 calls.
+%% - LEX_BINARY_TABLE defined (erlc -DLEX_BINARY_TABLE): one binary of
+%%   States*256 entries, the entry for (State, Byte) at index
+%%   (State-1)*256 + Byte. Each entry is a signed integer of
+%%   LEX_TABLE_BITS bits (default 16), so ?no_match is still -1 and a
+%%   table holds at most 2^(LEX_TABLE_BITS-1)-1 states.
+
+-ifdef(LEX_BINARY_TABLE).
+-ifndef(LEX_TABLE_BITS).
+-define(LEX_TABLE_BITS, 16).
+-endif.
+-define(table_bytes, (?LEX_TABLE_BITS div 8)).
+-define(row_bytes, (256 * ?table_bytes)).
+-define(next(State, Byte, Table), bin_next(State, Byte, Table)).
+-compile({inline, [bin_next/3]}).
+-else.
+-define(next(State, Byte, Table), element((Byte) + 1, element(State, Table))).
+-endif.
 
 -define(compact_no_match, 255).
 
@@ -576,7 +597,7 @@ bin_longest_a(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMod
 %% of bytes read before the DFA got stuck (or the input ended).
 
 scan(<<C, Rest/binary>>, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
-    case element(C+1, element(State, Table)) of
+    case ?next(State, C, Table) of
 	?no_match ->
 	    scan_done(N, LastState, LastLen, LastRevAcc);
 	Next when ?is_accepting(Next, AcceptLimit) ->
@@ -736,7 +757,7 @@ io_longest_a(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode
 
 io_scan([B | T], Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc)
   when is_integer(B), B >= 0, B =< 255 ->
-    case element(B+1, element(State, Table)) of
+    case ?next(State, B, Table) of
 	?no_match ->
 	    io_done(stuck, N, LastState, LastLen, LastRevAcc);
 	Next when ?is_accepting(Next, AcceptLimit) ->
@@ -760,7 +781,7 @@ io_scan(_NotIoData, _Stack, _State, _Table, _AcceptLimit, N, _RevAcc, LastState,
     io_done(stuck, N, LastState, LastLen, LastRevAcc).
 
 io_scan_b(<<C, Rest/binary>>, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
-    case element(C+1, element(State, Table)) of
+    case ?next(State, C, Table) of
 	?no_match ->
 	    io_done(stuck, N, LastState, LastLen, LastRevAcc);
 	Next when ?is_accepting(Next, AcceptLimit) ->
@@ -1107,13 +1128,21 @@ no_more() ->
 %% true if State has no transitions: an accepted token ending in it
 %% cannot be extended
 
+-ifdef(LEX_BINARY_TABLE).
+dead_state(State, Table) ->
+    Row = binary:part(Table, (State - 1) * ?row_bytes, ?row_bytes),
+    Row =:= << <<?no_match:?LEX_TABLE_BITS/signed>> || _ <- lists:seq(0, 255) >>.
+-else.
 dead_state(State, Table) ->
     dead_row(element(State, Table), ?max_char + 1).
+-endif.
 
+-ifndef(LEX_BINARY_TABLE).
 dead_row(_Row, 0) ->
     true;
 dead_row(Row, I) ->
     element(I, Row) == ?no_match andalso dead_row(Row, I-1).
+-endif.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -2151,7 +2180,19 @@ generate_table(DFA) ->
     States = lists:keysort(
 	       1,
 	       [ {ID, state(ID, DFA)} || ID <- states_of(DFA) ]),
-    list_to_tuple([ generate_row(State) || State <- States ]).
+    table_from_rows([ generate_row(State) || State <- States ]).
+
+-ifdef(LEX_BINARY_TABLE).
+table_from_rows(Rows) ->
+    Max = (1 bsl (?LEX_TABLE_BITS - 1)) - 1,
+    case length(Rows) of
+	N when N > Max -> exit({table_too_large, N, {max_states, Max}});
+	_ -> << <<Next:?LEX_TABLE_BITS/signed>> || Row <- Rows, Next <- tuple_to_list(Row) >>
+    end.
+-else.
+table_from_rows(Rows) ->
+    list_to_tuple(Rows).
+-endif.
 
 %% each row is the transition function for the corresponding state,
 %% a tuple of ?maxchar elements
@@ -2438,6 +2479,29 @@ o_post_accept("", _Acc, AccSt, _State, _Nxt, Table,
 %% Anything that is not a byte (e.g., a code point > 255 in a list) can
 %% never match; it is reported by report_no_match/3.
 
+%% transition(State, Byte, Table) -> NextState | -1 (no match), where
+%% Table is element 4 of the {lex, ...} table tuple.
+
+transition(State, Byte, Table) ->
+    ?next(State, Byte, Table).
+
+-ifdef(LEX_BINARY_TABLE).
+bin_next(State, Byte, Table) ->
+    Skip = ((State - 1) bsl 8) bor Byte,
+    <<_:Skip/binary-unit:?LEX_TABLE_BITS, Next:?LEX_TABLE_BITS/signed, _/binary>> = Table,
+    Next.
+
+%% The row is a sub-binary of the table.
+next_state(Char, Row)
+  when is_integer(Char), Char >= ?min_char, Char =< ?max_char ->
+    <<_:Char/binary-unit:?LEX_TABLE_BITS, Next:?LEX_TABLE_BITS/signed, _/binary>> = Row,
+    Next;
+next_state(_Char, _Row) ->
+    ?no_match.
+
+transition_table(State, Table) ->
+    binary:part(Table, (State - 1) * ?row_bytes, ?row_bytes).
+-else.
 next_state(Char, Trans_table)
   when is_integer(Char), Char >= ?min_char, Char =< ?max_char ->
     element(Char+1, Trans_table);
@@ -2448,6 +2512,7 @@ next_state(_Char, _Trans_table) ->
 
 transition_table(State, Table) ->
     element(State, Table).
+-endif.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 

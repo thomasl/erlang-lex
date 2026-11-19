@@ -576,6 +576,7 @@ pays off only together with the unboxed loop.
 | `safe_literal(String)` | escape the regexp special characters in `String`, so `lex:safe_literal("a+b")` matches the text `a+b` |
 | `strip_c_comments(String)` | remove (nestable) `/* ... */` comments; a pre-pass for input that is hard to describe with regexps |
 | `resolve_line(String)` | replace `?LINE` with the line number |
+| `transition(State, Byte, Table)` | the next state of the DFA, or -1; `Table` is element 4 of a table from `regexps_to_table/2`, in either [representation](#table-representation) |
 
 ### Building a table step by step
 
@@ -969,6 +970,70 @@ byte. Large Unicode classes in UTF-8 cost a few hundred states.
 built in 55 ms on an Athlon 1300+, and `real_erlang_lex()` in 66-68 ms
 on a 1.6 GHz laptop. The DFA was not minimized then.)
 
+### Table representation
+
+By default the DFA table is a tuple with one row per state, and each row
+is a tuple of 256 next states, so a transition is two `element/2` calls.
+`lex.erl` can instead be compiled with the table as a single binary of
+`States * 256` entries, where the entry for `(State, Byte)` is at index
+`(State - 1) * 256 + Byte`:
+
+```sh
+erlc +export_all -DLEX_BINARY_TABLE -o ebin src/lex.erl                     # 16-bit entries
+erlc +export_all -DLEX_BINARY_TABLE -DLEX_TABLE_BITS=32 -o ebin src/lex.erl
+```
+
+Entries are signed integers of `LEX_TABLE_BITS` bits (default 16), so
+"no match" is still -1 and a table holds at most 2^(bits-1) - 1 states;
+a bigger DFA exits with `{table_too_large, States, {max_states, Max}}`.
+8 bits (127 states) is too few for Unicode classes: 69 of the tests
+fail that way. With 16 and 32 bits all tests pass. The tests read
+tables through `lex:transition(State, Byte, Table)`, which works with
+either representation.
+
+`make bench-table` ([bench/lex_table_bench.erl](../bench/lex_table_bench.erl))
+compares them on an Erlang lexer: keywords, atoms, variables, integers
+in every base, floats, strings, quoted atoms, `$` characters, comments
+and all operators, 44 rules. It comes in an ASCII/Latin-1 version
+(`bytes`) and one with UAX #31 identifiers in UTF-8. The input is this
+repository's Erlang source repeated to 1.17 MB, giving 226,385 tokens.
+Each time is the median of 9 runs, each in a new process, with the table
+built beforehand. Measured on an Apple M4 with Erlang/OTP 29:
+
+| | tuple | binary, 16 bits | binary, 32 bits |
+|---|---|---|---|
+| `bytes`: 174 states | | | |
+| table in memory | 359 KB | 89 KB | 178 KB |
+| `term_to_binary` size | 179 KB | 89 KB | 178 KB |
+| give the table to a new process | 67 µs | 0.7 µs | 0.7 µs |
+| lex a binary | 32.0 ms | 41.8 ms | 42.0 ms |
+| lex a string | 33.4 ms | 41.7 ms | 44.0 ms |
+| lex an iolist of lines | 42.4 ms | 66.7 ms | 69.0 ms |
+| `utf8`: 1,147 states | | | |
+| table in memory | 2.37 MB | 587 KB | 1.17 MB |
+| `term_to_binary` size | 1.31 MB | 587 KB | 1.17 MB |
+| give the table to a new process | 436 µs | 0.8 µs | 0.8 µs |
+| lex a binary | 46.1 ms | 49.1 ms | 49.7 ms |
+| lex a string | 40.9 ms | 48.6 ms | 49.3 ms |
+| lex an iolist of lines | 53.8 ms | 91.3 ms | 91.1 ms |
+
+The 16-bit binary is a quarter of the size of the tuples (512 bytes per
+state instead of 257 words). Since it is a large, reference-counted
+binary, it is never copied: giving it to another process is free. But
+lexing is slower. It takes 7-30% longer on binaries and strings, and
+55-70% longer on iolists of short binaries. A tuple lookup allocates
+nothing, while each binary lookup starts a new match on the table
+(`bs_start_match3`) and so creates a match context on the heap for
+every byte lexed. Inlining the lookup makes no difference.
+`binary:at/2`, which allocates nothing, was slower still in a
+micro-benchmark, since 16 bits take two calls. 32-bit entries cost the
+same time as 16-bit ones and twice the space.
+
+So the tuple stays the default, and the binary is a compile-time option.
+The binary pays off when one table is shared by many processes or
+stored, where it saves memory and copying. A tuple table can also avoid
+being copied by keeping it in `persistent_term`.
+
 ## Lexing corner cases
 
 The driver tries to match a maximally long token ("maximal munch"),
@@ -1149,7 +1214,9 @@ Syntax and semantics of the classes:
   Server Protocol use. Except in the non-blocking incremental interface
   (one position per continuation), the position is kept in the process
   dictionary, so it is per process; actions always read it from there.
-- **Table size.** Every state is a 256-element tuple. Sparse tables,
+- **Table size.** Every state is a 256-element tuple (or, compiled with
+  `-DLEX_BINARY_TABLE`, 512 bytes of a binary, which is smaller but
+  slower; see [Table representation](#table-representation)). Sparse tables,
   equivalence classes of bytes (as in `flex`), or generating Erlang code
   from the DFA (as `leex` does) would make large and little-endian
   tables smaller and possibly faster.

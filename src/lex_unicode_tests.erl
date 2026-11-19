@@ -18,7 +18,7 @@ accepts({lex, Start, AccLim, Table, _Actions, _Enc, _NL, _PosMode}, Bytes) ->
 walk(S, AccLim, _Table, []) ->
     S =< AccLim;
 walk(S, AccLim, Table, [B | Bs]) ->
-    case element(B + 1, element(S, Table)) of
+    case lex:transition(S, B, Table) of
         -1 -> false;
         N -> walk(N, AccLim, Table, Bs)
     end.
@@ -32,7 +32,7 @@ count(S, AccLim, Table, Memo) ->
     case Memo of
         #{S := N} -> {N, Memo};
         _ ->
-            Row = tuple_to_list(element(S, Table)),
+            Row = [lex:transition(S, B, Table) || B <- lists:seq(0, 255)],
             {N, Memo1} =
                 lists:foldl(fun(-1, Acc) -> Acc;
                                (Nxt, {K, M}) ->

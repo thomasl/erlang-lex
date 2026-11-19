@@ -26,3 +26,19 @@ clean:
 	(cd src ; make clean)
 
 .PHONY: all test unicode-data clean
+
+# Compare the DFA table as a tuple of tuples with a binary of 16- and
+# 32-bit entries (see doc/README.md, "Table representation").
+BENCH_VARIANTS = tuple bin16 bin32
+bench-table: all
+	@for v in $(BENCH_VARIANTS); do \
+	  mkdir -p bench/ebin_$$v; \
+	  case $$v in \
+	    tuple) defs="" ;; \
+	    bin16) defs="-DLEX_BINARY_TABLE -DLEX_TABLE_BITS=16" ;; \
+	    bin32) defs="-DLEX_BINARY_TABLE -DLEX_TABLE_BITS=32" ;; \
+	  esac; \
+	  erlc +export_all $$defs -o bench/ebin_$$v src/lex.erl || exit 1; \
+	  erlc -o bench/ebin_$$v bench/lex_table_bench.erl || exit 1; \
+	  erl -noshell -pa ebin -pa bench/ebin_$$v -run lex_table_bench run $$v -s init stop || exit 1; \
+	done
