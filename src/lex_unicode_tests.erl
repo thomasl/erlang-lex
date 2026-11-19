@@ -2,6 +2,7 @@
 
 -module(lex_unicode_tests).
 -include_lib("eunit/include/eunit.hrl").
+-include("lex.hrl").
 
 -define(ENCODINGS, [utf8, {utf16, big}, {utf16, little}, {utf32, big}, {utf32, little}]).
 
@@ -12,7 +13,7 @@ table(Regexp, Enc) ->
     lex:regexps_to_table([{regexp, Regexp, lex:item(t)}], [{encoding, Enc}]).
 
 %% Run the DFA over Bytes; true if it ends in an accepting state.
-accepts({lex, Start, AccLim, Table, _Actions, _Enc, _NL, _PosMode}, Bytes) ->
+accepts(#lex{start = Start, accept_limit = AccLim, table = Table}, Bytes) ->
     walk(Start, AccLim, Table, Bytes).
 
 walk(S, AccLim, _Table, []) ->
@@ -24,7 +25,7 @@ walk(S, AccLim, Table, [B | Bs]) ->
     end.
 
 %% Number of distinct byte strings accepted by an acyclic table.
-count_accepted({lex, Start, AccLim, Table, _Actions, _Enc, _NL, _PosMode}) ->
+count_accepted(#lex{start = Start, accept_limit = AccLim, table = Table}) ->
     {N, _} = count(Start, AccLim, Table, #{}),
     N.
 
@@ -168,7 +169,7 @@ property_data_test() ->
 
 %% \P{X}, \p{^X} and [^\p{X}] are the same class
 negation_forms_test() ->
-    T = fun(Re) -> element(4, table(Re, utf8)) end,
+    T = fun(Re) -> (table(Re, utf8))#lex.table end,
     ?assertEqual(T("\\P{L}"), T("\\p{^L}")),
     ?assertEqual(T("\\P{L}"), T("[^\\p{L}]")),
     ?assertEqual(T("\\PL"), T("\\P{L}")),
@@ -1116,7 +1117,7 @@ socket_loop(Sock, C, Acc) ->
 %% Binary tables ({table, binary})
 
 table_tag(Re, Opts) ->
-    element(1, element(4, lex:regexps_to_table([{regexp, Re, lex:item(t)}], Opts))).
+    element(1, (lex:regexps_to_table([{regexp, Re, lex:item(t)}], Opts))#lex.table).
 
 binary_table_width_test_() ->
     Ident = "\\p{XID_Start}\\p{XID_Continue}*",
@@ -1134,13 +1135,13 @@ binary_table_width_test_() ->
 binary_table_transitions_test() ->
     Rules = driver_rules(utf8),
     Tuple = lex:regexps_to_table(Rules, [{encoding, utf8}]),
-    T = element(4, Tuple),
+    T = Tuple#lex.table,
     [ begin
           Bin = lex:regexps_to_table(Rules, [{encoding, utf8}, {table, Rep}]),
-          B = element(4, Bin),
+          B = Bin#lex.table,
           ?assertEqual([lex:transition(S, C, T) || S <- lists:seq(1, tuple_size(T)), C <- lists:seq(0, 255)],
                        [lex:transition(S, C, B) || S <- lists:seq(1, tuple_size(T)), C <- lists:seq(0, 255)]),
-          ?assertEqual(T, element(4, lex:tuple_table(Bin)))
+          ?assertEqual(T, (lex:tuple_table(Bin))#lex.table)
       end || Rep <- [binary, {binary, 8}, {binary, 16}, {binary, 32}] ].
 
 %% Every driver gives the same tokens, positions and errors with a

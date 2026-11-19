@@ -9,7 +9,7 @@ OBJ := $(SRC:./%.erl=$(OBJDIR)/%.beam)
 
 all: $(OBJ)
 
-../ebin/%.beam: %.erl
+../ebin/%.beam: %.erl $(INC)
 	$(ERLC) $(ERLC_OPTS) $<
 
 clean:

@@ -12,6 +12,8 @@
 
 -module(lex_table_bench).
 
+-include("lex.hrl").
+
 -export([run/0, rules/1]).
 
 -define(RUNS, 9).
@@ -26,16 +28,16 @@ run() ->
 spec(Spec, Corpus) ->
     Opts = opts(Spec),
     Tuple = lex:regexps_to_table(rules(Spec), Opts),
-    States = tuple_size(element(4, Tuple)),
+    States = tuple_size(Tuple#lex.table),
     io:format("~n~s: ~w states (~w accepting), ~w tokens~n",
-              [Spec, States, element(3, Tuple), length(lex_binary(Tuple, Corpus))]),
+              [Spec, States, Tuple#lex.accept_limit, length(lex_binary(Tuple, Corpus))]),
     Reps = [tuple, binary] ++ [{binary, B} || B <- [8, 16, 32], States < 1 bsl B],
     [variant(Spec, Rep, Opts, Corpus) || Rep <- Reps],
     ok.
 
 variant(Spec, Rep, Opts, Corpus) ->
     {BuildUs, LEX} = timer:tc(fun() -> lex:regexps_to_table(rules(Spec), [{table, Rep} | Opts]) end),
-    Table = element(4, LEX),
+    Table = LEX#lex.table,
     Name = io_lib:format("~s ~w (~w)", [Spec, Rep, kind(Table)]),
     io:format("~s: table ~w bytes in memory, ~w bytes external, built in ~.1f ms, "
               "send to a new process ~.1f us~n",

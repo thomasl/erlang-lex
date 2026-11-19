@@ -4,6 +4,8 @@
 %% See doc/README.md for documentation, discussion, usage, etc.
 
 -module(lex).
+
+-include("lex.hrl").
 -author('thomasl_erlang@yahoo.com').
 -export(
    [one/2,
@@ -233,11 +235,11 @@ one(LEX, IoList) when is_list(IoList) ->
 %% with/2,3 now use the iolist driver for lists, which gives the same
 %% results (the tests check this against one_list/2 and lex_string/2).
 
-one_list({lex, _, _, {Tag, _}, _, _, _, _} = LEX, String) when ?is_bin_table_tag(Tag) ->
+one_list(#lex{table = {Tag, _}} = LEX, String) when ?is_bin_table_tag(Tag) ->
     %% the list drivers only handle tuple tables (converting costs a
     %% whole table per token; lex_string/2 converts once)
     one_list(tuple_table(LEX), String);
-one_list(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, _PosMode}, String) ->
+one_list(LEX = #lex{encoding = Enc, newline = NL}, String) ->
     try longest_string(LEX, String)
     catch
 	throw:{?MODULE, no_match, RevAcc, Remainder} ->
@@ -249,7 +251,8 @@ one_list(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, _PosMode},
 %% NB: one/2 does not reset the line count (that would restart the count
 %%  at every token); call no_lines() before lexing a new input.
 
-longest_string({lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}, String) 
+longest_string(#lex{start = Start, accept_limit = AcceptLimit,
+                    table = Table, actions = Actions}, String) 
   when is_list(String) -> 
     longest_string(Start, Table, AcceptLimit, Actions, String);
 longest_string(_LEX, String) ->
@@ -420,15 +423,15 @@ post_accept("", _Acc, AccSt, _State, _Nxt, Table,
 %% converting it afterwards was measured to be slower, in particular for
 %% UTF-16 and UTF-32.)
 
-one_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, process}, Bin) ->
+one_binary(LEX = #lex{encoding = Enc, newline = NL, position = process}, Bin) ->
     try bin_longest(LEX, Bin)
     catch
 	throw:{?MODULE, bin_no_match, Bin1, Len, Pos} ->
 	    bin_report_no_match(Enc, NL, Pos, Bin1, Len)
     end;
-one_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, _Enc, _NL, unboxed}, Bin) ->
+one_binary(LEX = #lex{position = unboxed}, Bin) ->
     one_binary(to_argument(LEX), Bin);
-one_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, argument}, Bin) ->
+one_binary(LEX = #lex{encoding = Enc, newline = NL, position = argument}, Bin) ->
     try bin_longest_a(LEX, Bin, entry_pos(argument)) of
 	{token, T, Rest, Pos1} ->
 	    exit_pos(Pos1),
@@ -477,7 +480,7 @@ with_gc_limits(Which, Size, Fun) ->
 	[ process_flag(Flag, Old) || {Flag, Old} <- Restore ]
     end.
 
-lex_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, PosMode}, Bin) ->
+lex_binary(LEX = #lex{encoding = Enc, newline = NL, position = PosMode}, Bin) ->
     try
 	case PosMode of
 	    process -> lex_binary(LEX, Bin, []);
@@ -493,15 +496,15 @@ lex_binary(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, PosMode}
 %% dictionary; in argument mode the position starts in the driver, and
 %% the dictionary is not used at all.
 
-reset_pos({lex, _, _, _, _, _, _, process}) -> no_lines();
-reset_pos({lex, _, _, _, _, _, _, _ArgumentOrUnboxed}) -> ok.
+reset_pos(#lex{position = process}) -> no_lines();
+reset_pos(#lex{}) -> ok.
 
 %% An unboxed table as an argument mode one: for the drivers that return
 %% after each token (one/2,3, the incremental interface), which hand the
 %% position back to their caller anyway.
 
-to_argument({lex, Start, AcceptLimit, Table, {unboxed, _Unboxed, Wrappers}, Enc, NL, unboxed}) ->
-    {lex, Start, AcceptLimit, Table, Wrappers, Enc, NL, argument};
+to_argument(LEX = #lex{actions = {unboxed, _Unboxed, Wrappers}, position = unboxed}) ->
+    LEX#lex{actions = Wrappers, position = argument};
 to_argument(LEX) ->
     LEX.
 
@@ -539,7 +542,8 @@ lex_binary_a(LEX, Bin, Pos, Acc) ->
 
 bin_longest(_LEX, <<>>) ->
     end_of_stream;
-bin_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}, Bin) ->
+bin_longest(LEX = #lex{start = Start, accept_limit = AcceptLimit,
+                       table = Table, actions = Actions}, Bin) ->
     case scan_table(Bin, Start, Table, AcceptLimit) of
 	{accept, State, Len, RevAcc} ->
 	    <<_:Len/binary, Rest/binary>> = Bin,
@@ -559,7 +563,8 @@ bin_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}
 
 bin_longest_a(_LEX, <<>>, Pos) ->
     {end_of_stream, Pos};
-bin_longest_a(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}, Bin, Pos) ->
+bin_longest_a(LEX = #lex{start = Start, accept_limit = AcceptLimit,
+                         table = Table, actions = Actions}, Bin, Pos) ->
     case scan_table(Bin, Start, Table, AcceptLimit) of
 	{accept, State, Len, RevAcc} ->
 	    <<_:Len/binary, Rest/binary>> = Bin,
@@ -639,7 +644,7 @@ bin_report_no_match(Enc, NL, Pos, Bin, Len) ->
 %% of a token; it is reported like a non-byte in a list (not_a_byte in
 %% the Unicode encodings, lex_no_match in bytes mode).
 
-one_iolist(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, process}, IoData) ->
+one_iolist(LEX = #lex{encoding = Enc, newline = NL, position = process}, IoData) ->
     try io_longest(LEX, IoData, []) of
 	{token, T, {Cur, Stack}} ->
 	    {token, T, io_join(Cur, Stack)};
@@ -649,9 +654,9 @@ one_iolist(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, process}
 	throw:{?MODULE, io_no_match, Cur, Stack, Len, Pos} ->
 	    io_report_no_match(Enc, NL, Pos, Cur, Stack, Len)
     end;
-one_iolist(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, _Enc, _NL, unboxed}, IoData) ->
+one_iolist(LEX = #lex{position = unboxed}, IoData) ->
     one_iolist(to_argument(LEX), IoData);
-one_iolist(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, argument}, IoData) ->
+one_iolist(LEX = #lex{encoding = Enc, newline = NL, position = argument}, IoData) ->
     try io_longest_a(LEX, IoData, [], entry_pos(argument)) of
 	{token, T, {Cur, Stack}, Pos1} ->
 	    exit_pos(Pos1),
@@ -664,7 +669,7 @@ one_iolist(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, argument
 	    io_report_no_match(Enc, NL, Pos, Cur, Stack, Len)
     end.
 
-lex_iolist(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, PosMode}, IoData) ->
+lex_iolist(LEX = #lex{encoding = Enc, newline = NL, position = PosMode}, IoData) ->
     try
 	case PosMode of
 	    process -> lex_iolist(LEX, IoData, [], []);
@@ -696,7 +701,8 @@ lex_iolist_a(LEX, Cur, Stack, Pos, Acc) ->
 
 %% process mode
 
-io_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}, Cur, Stack) ->
+io_longest(LEX = #lex{start = Start, accept_limit = AcceptLimit,
+                      table = Table, actions = Actions}, Cur, Stack) ->
     case io_eof(io_scan_table(Cur, Stack, Start, Table, AcceptLimit, 0, [], 0, 0, [])) of
 	{accept, State, Len, RevAcc} ->
 	    {Cur1, Stack1} = io_skip(Cur, Stack, Len),
@@ -714,7 +720,8 @@ io_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode},
 
 %% argument mode
 
-io_longest_a(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}, Cur, Stack, Pos) ->
+io_longest_a(LEX = #lex{start = Start, accept_limit = AcceptLimit,
+                        table = Table, actions = Actions}, Cur, Stack, Pos) ->
     case io_eof(io_scan_table(Cur, Stack, Start, Table, AcceptLimit, 0, [], 0, 0, [])) of
 	{accept, State, Len, RevAcc} ->
 	    {Cur1, Stack1} = io_skip(Cur, Stack, Len),
@@ -800,7 +807,7 @@ io_scan_b(<<>>, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen,
 
 binary_table(LEX, tuple) ->
     LEX;
-binary_table({lex, Start, AcceptLimit, Table, Actions, Enc, NL, PosMode}, Rep) ->
+binary_table(LEX = #lex{table = Table}, Rep) ->
     States = tuple_size(Table),
     Bits = case Rep of
 	       binary -> hd([B || B <- [8, 16, 32], States < 1 bsl B]);
@@ -809,7 +816,7 @@ binary_table({lex, Start, AcceptLimit, Table, Actions, Enc, NL, PosMode}, Rep) -
 	   end,
     Bin = << <<(case Next of ?no_match -> 0; _ -> Next end):Bits>>
 	     || Row <- tuple_to_list(Table), Next <- tuple_to_list(Row) >>,
-    {lex, Start, AcceptLimit, {bin_table_tag(Bits), Bin}, Actions, Enc, NL, PosMode}.
+    LEX#lex{table = {bin_table_tag(Bits), Bin}}.
 
 bin_table_tag(8) -> bin8;
 bin_table_tag(16) -> bin16;
@@ -820,13 +827,12 @@ bin_table_bits(bin16) -> 16;
 bin_table_bits(bin32) -> 32.
 
 %% A binary table back to tuples (for the old list drivers)
-tuple_table({lex, Start, AcceptLimit, {Tag, Bin}, Actions, Enc, NL, PosMode})
-  when ?is_bin_table_tag(Tag) ->
+tuple_table(LEX = #lex{table = {Tag, Bin}}) when ?is_bin_table_tag(Tag) ->
     Bits = bin_table_bits(Tag),
     Rows = [list_to_tuple([case Next of 0 -> ?no_match; _ -> Next end
 			   || <<Next:Bits>> <= Row])
 	    || <<Row:(256 * Bits)/bits>> <= Bin],
-    {lex, Start, AcceptLimit, list_to_tuple(Rows), Actions, Enc, NL, PosMode};
+    LEX#lex{table = list_to_tuple(Rows)};
 tuple_table(LEX) ->
     LEX.
 
@@ -1054,7 +1060,7 @@ io_take(Bad, _Stack, _K, Acc) ->
 	 pos = {1, 1, false}	% {Line, Column, AfterCR}
 	}).
 
-start(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, _Enc, _NL, _PosMode}) ->
+start(LEX = #lex{}) ->
     #lexc{lex = to_argument(LEX)}.
 
 feed(#lexc{ended = true}, _Data) ->
@@ -1072,7 +1078,7 @@ rest(#lexc{cur = Cur, stack = Stack, tail = Tail}) ->
 position(#lexc{pos = {Line, Col, _AfterCR}}) ->
     {Line, Col}.
 
-next(C = #lexc{lex = {lex, _, _, _, _, _, _, process}, pos = Pos}) ->
+next(C = #lexc{lex = #lex{position = process}, pos = Pos}) ->
     %% process mode: the actions keep the position in the dictionary
     put(?pos_key, Pos),
     case next1(C) of
@@ -1101,20 +1107,20 @@ tokens(C, Acc) ->
 
 next1(C = #lexc{fail = Len}) when Len =/= none ->
     check_fail(C);
-next1(C = #lexc{lex = {lex, Start, AcceptLimit, Table, _, _, _, _PosMode},
+next1(C = #lexc{lex = #lex{start = Start, accept_limit = AcceptLimit, table = Table},
 		cur = Cur, stack = Stack, tail = Tail, scan = none}) ->
     %% a new token: scan from its start, through all the data
     Stack1 = Stack ++ lists:reverse(Tail),
     C1 = C#lexc{stack = Stack1, tail = []},
     scanned(C1, io_scan_table(Cur, Stack1, Start, Table, AcceptLimit, 0, [], 0, 0, []));
-next1(C = #lexc{lex = {lex, _Start, AcceptLimit, Table, _, _, _, _PosMode},
+next1(C = #lexc{lex = #lex{accept_limit = AcceptLimit, table = Table},
 		scan = {State, N, RevAcc, LastState, LastLen, LastRevAcc}, new = New}) ->
     %% resume the scan with the chunks fed since it stopped
     C1 = C#lexc{scan = none, new = []},
     scanned(C1, io_scan_table(lists:reverse(New), [], State, Table, AcceptLimit,
 			N, RevAcc, LastState, LastLen, LastRevAcc)).
 
-scanned(C = #lexc{lex = {lex, _Start, _AcceptLimit, Table, _, _, _, _PosMode}, ended = Ended},
+scanned(C = #lexc{lex = #lex{table = Table}, ended = Ended},
 	{eof, State, N, RevAcc, LastState, LastLen, LastRevAcc} = Eof) ->
     case Ended orelse (LastLen == N andalso N > 0 andalso dead_state(State, Table)) of
 	true ->
@@ -1126,7 +1132,7 @@ scanned(C = #lexc{lex = {lex, _Start, _AcceptLimit, Table, _, _, _, _PosMode}, e
 scanned(C, Result) ->
     finish(C, Result).
 
-finish(C = #lexc{lex = {lex, _Start, _AcceptLimit, _Table, Actions, _, _, _PosMode},
+finish(C = #lexc{lex = #lex{actions = Actions},
 		 cur = Cur, stack = Stack, tail = Tail}, Result) ->
     case Result of
 	{accept, State, Len, RevAcc} ->
@@ -1143,7 +1149,7 @@ finish(C = #lexc{lex = {lex, _Start, _AcceptLimit, _Table, Actions, _, _, _PosMo
 %% process dictionary, and the result is used directly. Argument mode:
 %% the position is in the continuation, and passed to the action.
 
-emit_c(C = #lexc{lex = {lex, _, _, _, _, _, _, process}}, Actions, State, RevAcc) ->
+emit_c(C = #lexc{lex = #lex{position = process}}, Actions, State, RevAcc) ->
     case emit_token(Actions, State, RevAcc) of
 	no_token -> next1(C);
 	{token, T} -> {token, T, C}
@@ -1156,7 +1162,7 @@ emitted({emitted, no_token, C}) -> next1(C);
 emitted({emitted, {token, T}, C}) -> {token, T, C};
 emitted(Result) -> Result.
 
-c_report_pos(#lexc{lex = {lex, _, _, _, _, _, _, process}}) -> position();
+c_report_pos(#lexc{lex = #lex{position = process}}) -> position();
 c_report_pos(#lexc{pos = Pos}) -> Pos.
 
 %% A token of Len bytes failed. In the Unicode encodings, the error may
@@ -1165,7 +1171,7 @@ c_report_pos(#lexc{pos = Pos}) -> Pos.
 %% turn into invalid (or show to be fine). So while it looks incomplete
 %% and the stream has not ended, ask for more; otherwise report.
 
-check_fail(C = #lexc{lex = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, _PosMode},
+check_fail(C = #lexc{lex = #lex{encoding = Enc, newline = NL},
 		     cur = Cur, stack = Stack, tail = Tail, ended = Ended, fail = Len}) ->
     Stack1 = Stack ++ lists:reverse(Tail),
     case Ended orelse not looks_incomplete(Enc, Cur, Stack1, Len) of
@@ -1190,10 +1196,10 @@ looks_incomplete(Enc, Cur, Stack, Len) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% The blocking interface: a function More() is called for data
 
-one(LEX0 = {lex, _Start, _AcceptLimit, _Table, _Actions, _Enc, _NL, _PosMode}, Data, More)
+one(LEX0 = #lex{}, Data, More)
   when is_function(More, 0) ->
     %% continue from the position in the process dictionary, as one/2
-    LEX = {lex, _, _, _, _, _, _, PosMode} = to_argument(LEX0),
+    LEX = #lex{position = PosMode} = to_argument(LEX0),
     C = feed(#lexc{lex = LEX, pos = position()}, Data),
     case drive(C, More) of
 	{token, T, C1 = #lexc{pos = Pos1}, More1} ->
@@ -1281,7 +1287,8 @@ dead_row(Row, I) ->
 
 lex_binary_u(_LEX, <<>>, _Line, _Col, _AfterCR, Acc) ->
     lists:reverse(Acc);
-lex_binary_u(LEX = {lex, Start, AcceptLimit, Table, {unboxed, Actions, _}, Enc, _NL, _},
+lex_binary_u(LEX = #lex{start = Start, accept_limit = AcceptLimit,
+                        table = Table, actions = {unboxed, Actions, _}, encoding = Enc},
 	     Bin, Line, Col, AfterCR, Acc) ->
     case scan_table(Bin, Start, Table, AcceptLimit) of
 	{accept, State, Len, RevAcc} ->
@@ -1301,7 +1308,8 @@ lex_binary_u(LEX = {lex, Start, AcceptLimit, Table, {unboxed, Actions, _}, Enc, 
 	    throw({?MODULE, bin_no_match, Bin, Len, {Line, Col, AfterCR}})
     end.
 
-lex_iolist_u(LEX = {lex, Start, AcceptLimit, Table, {unboxed, Actions, _}, Enc, _NL, _},
+lex_iolist_u(LEX = #lex{start = Start, accept_limit = AcceptLimit,
+                        table = Table, actions = {unboxed, Actions, _}, encoding = Enc},
 	     Cur, Stack, Line, Col, AfterCR, Acc) ->
     case io_eof(io_scan_table(Cur, Stack, Start, Table, AcceptLimit, 0, [], 0, 0, [])) of
 	{accept, State, Len, RevAcc} ->
@@ -1325,7 +1333,7 @@ lex_iolist_u(LEX = {lex, Start, AcceptLimit, Table, {unboxed, Actions, _}, Enc, 
 
 %% advance over the token, then continue with the next one
 
-u_next(Kind, LEX = {lex, _, _, _, _, _, NL, _}, Rest, Result, RevChars, Line, Col, AfterCR, Acc) ->
+u_next(Kind, LEX = #lex{newline = NL}, Rest, Result, RevChars, Line, Col, AfterCR, Acc) ->
     case rev_cols(RevChars, NL, 0) of
 	K when K < 0 ->
 	    %% no line terminator: -K-1 more columns on the same line
@@ -2293,9 +2301,13 @@ dfa_to_table(DFA, Regexp_rules, Enc, NL, PosMode) ->
     generate_code(NewDFA, AcceptLimit, Actions, Enc, NL, PosMode).
 
 generate_code(DFA, AcceptLimit, Actions, Enc, NL, PosMode) ->
-    Table = generate_table(DFA),
-    Start = start_state(DFA),
-    {lex, Start, AcceptLimit, Table, Actions, Enc, NL, PosMode}.
+    #lex{start = start_state(DFA),
+	 accept_limit = AcceptLimit,
+	 table = generate_table(DFA),
+	 actions = Actions,
+	 encoding = Enc,
+	 newline = NL,
+	 position = PosMode}.
 
 %% The table is a tuple of one row/element per state
 %%
@@ -2440,9 +2452,9 @@ rename_state(_X, [], Map) ->
 %%
 %% A sequence is a string (list of char) or a binary
 
-o_longest({lex, _, _, {Tag, _}, _, _, _, _} = Lex, Seq) when ?is_bin_table_tag(Tag) ->
+o_longest(#lex{table = {Tag, _}} = Lex, Seq) when ?is_bin_table_tag(Tag) ->
     o_longest(tuple_table(Lex), Seq);
-o_longest(Lex = {lex, _, _, _, _, Enc, NL, _PosMode}, Seq) when is_list(Seq) ->
+o_longest(Lex = #lex{encoding = Enc, newline = NL}, Seq) when is_list(Seq) ->
     try o_longest_string(Lex, Seq)
     catch
 	throw:{?MODULE, no_match, RevAcc, Remainder} ->
@@ -2451,7 +2463,8 @@ o_longest(Lex = {lex, _, _, _, _, Enc, NL, _PosMode}, Seq) when is_list(Seq) ->
 
 %% Longest match applied to string (list of chars)
 
-o_longest_string({lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}, String) 
+o_longest_string(#lex{start = Start, accept_limit = AcceptLimit,
+                      table = Table, actions = Actions}, String) 
   when is_list(String) -> 
     no_lines(),
     o_longest_string(Start, Table, AcceptLimit, Actions, String).
@@ -2599,7 +2612,8 @@ o_post_accept("", _Acc, AccSt, _State, _Nxt, Table,
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %% transition(State, Byte, Table) -> NextState | -1 (no match), where
-%% Table is element 4 of a {lex, ...} table, in either representation.
+%% Table is the table field of a #lex{} (see lex.hrl), in either
+%% representation.
 
 transition(State, Byte, {Tag, Bin}) when ?is_bin_table_tag(Tag) ->
     Bits = bin_table_bits(Tag),

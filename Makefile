@@ -30,5 +30,5 @@ clean:
 # Compare the DFA table as a tuple of tuples with binaries of 8-, 16-
 # and 32-bit entries (see doc/README.md, "Table representation").
 bench-table: all
-	erlc -o ebin bench/lex_table_bench.erl
+	erlc -I src -o ebin bench/lex_table_bench.erl
 	erl -noshell -pa ebin -eval 'lex_table_bench:run(), halt().'

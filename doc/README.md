@@ -165,8 +165,9 @@ Compile the rules. `Options` is a list of:
   share between processes, but lexing is slower; see
   [Table representation](#table-representation)
 
-Errors in the rules exit here, see [Errors](#errors). The table is
-`{lex, Start, AcceptLimit, Table, Actions, Enc, NL, PosMode}`; treat it as opaque.
+Errors in the rules exit here, see [Errors](#errors). The table is a
+`#lex{}` record, defined in [src/lex.hrl](../src/lex.hrl); treat it as
+opaque.
 
 ```erlang
 one(LexTable, Input) -> {token, Token, Rest} | end_of_stream
@@ -581,7 +582,7 @@ pays off only together with the unboxed loop.
 | `safe_literal(String)` | escape the regexp special characters in `String`, so `lex:safe_literal("a+b")` matches the text `a+b` |
 | `strip_c_comments(String)` | remove (nestable) `/* ... */` comments; a pre-pass for input that is hard to describe with regexps |
 | `resolve_line(String)` | replace `?LINE` with the line number |
-| `transition(State, Byte, Table)` | the next state of the DFA, or -1; `Table` is element 4 of a table from `regexps_to_table/2`, in either [representation](#table-representation) |
+| `transition(State, Byte, Table)` | the next state of the DFA, or -1; `Table` is the `table` field of the `#lex{}` from `regexps_to_table/2`, in either [representation](#table-representation) |
 
 ### Building a table step by step
 
