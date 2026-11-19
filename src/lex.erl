@@ -1355,14 +1355,14 @@ parse_regexp(Regexp) ->
     parse_regexp(Regexp, {bytes, false}).
 
 parse_regexp(Regexp, {bytes, Fold}) ->
-    case regexp_parse:string(Regexp) of
+    case lex_spec_parse:string(Regexp) of
   	{ok, RE} ->
   	    internal_form(RE, {bytes, Fold});
   	Err ->
   	    exit(Err)
     end;
 parse_regexp(Regexp, Ctx) ->
-    case regexp_parse:string(Regexp, unicode) of
+    case lex_spec_parse:string(Regexp, unicode) of
   	{ok, RE} ->
   	    internal_form(RE, Ctx);
   	{error, Err} ->

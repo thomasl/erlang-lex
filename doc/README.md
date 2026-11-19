@@ -874,8 +874,8 @@ end symbol yourself.
 
 ## How it works
 
-1. **Parse** each regexp (`regexp_parse.erl`, a recursive-descent parser
-   derived from the old OTP `regexp` module).
+1. **Parse** each regexp (`lex_spec_parse.erl`, a recursive-descent
+   parser; the grammar is at the top of the file).
 2. **Characters to sets.** Every character, class, `\p{...}`, POSIX class
    and `.` becomes a set of code points (bytes in `bytes` mode). With
    case-insensitivity the set is closed under case folding; then

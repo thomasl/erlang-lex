@@ -56,7 +56,4 @@ milliseconds for a programming language lexer); use
 
 ## License
 
-MIT; see [LICENSE](LICENSE). The exception is `src/regexp_parse.erl`
-and `src/regexp.erl.txt`, which derive from Ericsson's `regexp.erl`
-and remain under the Erlang Public License 1.1, as stated in their
-headers.
+MIT; see [LICENSE](LICENSE).

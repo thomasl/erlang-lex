@@ -93,7 +93,7 @@ Outside and inside classes:
 | `\n` `\r` `\t` `\v` `\f` | newline, CR, tab, VT, form feed | same |
 | `\b` | backspace (8) | same |
 | `\e` | escape (27) | same |
-| `\NNN` | the octal byte `NNN` (exactly three digits) | the code point `NNN` octal |
+| `\NNN` | the octal byte `NNN` (exactly three digits, at most `\377`) | the code point `NNN` octal |
 | `\xHH` | the byte `HH` (exactly two hex digits) | the code point `U+00HH` |
 | `\x{H...}` | the byte `H...` (at most `FF`) | the code point `U+H...` (at most `10FFFF`, not a surrogate) |
 | `\d` | DEL (127) | a decimal digit, `\p{Nd}` |
@@ -329,7 +329,8 @@ These parse as errors or are simply not in the language:
 
 - anchors `^` and `$` (parsed, then rejected with
   `{regexp_not_handled, bos | eos}`)
-- empty regexps and empty alternatives: `""`, `"a|"`, `"()"`
+- empty regexps and empty alternatives: `""`, `"a|"`, `"()"`, `"(|a)"`,
+  `"a||b"` (rejected with `{regexp_not_handled, epsilon}`)
 - counted repetition `r{n,m}` (`{` is an ordinary character)
 - lazy and possessive quantifiers, backreferences, lookahead and
   lookbehind, capture groups (a lexer has no use for captures: the

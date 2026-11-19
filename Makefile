@@ -11,7 +11,7 @@ all:
 
 test: all
 	erl -noshell -pa ebin -eval \
-	  'case eunit:test([lex_unicode_tests, lex_examples_tests], []) of ok -> halt(0); _ -> halt(1) end.'
+	  'case eunit:test([lex_spec_parse_tests, lex_unicode_tests, lex_examples_tests], []) of ok -> halt(0); _ -> halt(1) end.'
 
 # Regenerate src/lex_unicode_data.erl from the Unicode Character Database
 # (downloads the UCD files into $(UCD_DIR) unless they are already there).
