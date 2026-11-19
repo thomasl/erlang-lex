@@ -814,7 +814,7 @@ binary_table(LEX = #lex{table = Table}, Rep) ->
 	       {binary, B} when States < 1 bsl B -> B;
 	       {binary, B} -> exit({table_too_large, States, {binary, B}})
 	   end,
-    Bin = << <<(case Next of ?no_match -> 0; _ -> Next end):Bits>>
+    Bin = << <<(case Next of ?no_match -> 0; _ -> Next end):Bits/integer-unsigned-big>>
 	     || Row <- tuple_to_list(Table), Next <- tuple_to_list(Row) >>,
     LEX#lex{table = {bin_table_tag(Bits), Bin}}.
 
@@ -830,7 +830,7 @@ bin_table_bits(bin32) -> 32.
 tuple_table(LEX = #lex{table = {Tag, Bin}}) when ?is_bin_table_tag(Tag) ->
     Bits = bin_table_bits(Tag),
     Rows = [list_to_tuple([case Next of 0 -> ?no_match; _ -> Next end
-			   || <<Next:Bits>> <= Row])
+			   || <<Next:Bits/integer-unsigned-big>> <= Row])
 	    || <<Row:(256 * Bits)/bits>> <= Bin],
     LEX#lex{table = list_to_tuple(Rows)};
 tuple_table(LEX) ->
@@ -855,9 +855,11 @@ io_scan_table(Cur, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastL
     io_scan(Cur, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc).
 
 %% The next state of State on byte C, in a table of Bits-bit entries:
-%% binds Next (a macro, so that Bits is a literal in the pattern).
+%% binds Next to an unsigned integer, 0 for no match (a macro, so that
+%% Bits is a literal in the pattern).
 -define(bin_next(Next, State, C, Table, Bits),
-	<<_:(((State - 1) bsl 8) bor C)/binary-unit:Bits, Next:Bits, _/binary>> = Table).
+	<<_:(((State - 1) bsl 8) bor C)/binary-unit:Bits,
+	  Next:Bits/integer-unsigned-big, _/binary>> = Table).
 
 -define(BIN_SCAN(Scan, Bits),
 Scan(<<C, Rest/binary>>, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
@@ -2617,7 +2619,7 @@ o_post_accept("", _Acc, AccSt, _State, _Nxt, Table,
 
 transition(State, Byte, {Tag, Bin}) when ?is_bin_table_tag(Tag) ->
     Bits = bin_table_bits(Tag),
-    <<_:(((State - 1) * 256 + Byte) * Bits)/bits, Next:Bits, _/bits>> = Bin,
+    <<_:(((State - 1) * 256 + Byte) * Bits)/bits, Next:Bits/integer-unsigned-big, _/bits>> = Bin,
     case Next of
 	0 -> ?no_match;
 	_ -> Next

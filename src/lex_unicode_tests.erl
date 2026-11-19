@@ -1139,6 +1139,8 @@ binary_table_transitions_test() ->
     [ begin
           Bin = lex:regexps_to_table(Rules, [{encoding, utf8}, {table, Rep}]),
           B = Bin#lex.table,
+          Nexts = [lex:transition(S, C, B) || S <- lists:seq(1, tuple_size(T)), C <- lists:seq(0, 255)],
+          ?assert(lists:all(fun(N) -> is_integer(N) andalso (N == -1 orelse N >= 1) end, Nexts)),
           ?assertEqual([lex:transition(S, C, T) || S <- lists:seq(1, tuple_size(T)), C <- lists:seq(0, 255)],
                        [lex:transition(S, C, B) || S <- lists:seq(1, tuple_size(T)), C <- lists:seq(0, 255)]),
           ?assertEqual(T, (lex:tuple_table(Bin))#lex.table)
