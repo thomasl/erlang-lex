@@ -563,6 +563,12 @@ as above:
 (`bytes`, binary: 25% faster. The 4 KB chunks go through the
 non-blocking interface, so unboxed mode does not apply.)
 
+Using the same reverse-walk position update in the other modes was
+tried, and made them slower (`bytes`, binary: 36 to 43 ms in process
+mode; flat list: 37 to 46 ms in argument mode), although it is about as
+fast in isolation: tokens are short, so reversing them costs little. It
+pays off only together with the unboxed loop.
+
 ### Other utilities
 
 | Function | |

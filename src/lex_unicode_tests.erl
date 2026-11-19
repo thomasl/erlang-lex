@@ -1277,3 +1277,27 @@ unboxed_mode_test_() ->
                    caught(fun() -> lex:with(driver_rules(bytes, fun at3/1), [<<"cd\n">>, " ?"], [{position, unboxed}]) end)),
      ?_assertEqual({'EXIT', {lex_bad_encoding, utf8, invalid, {line, 2}, {column, 3}, {bytes, [16#FF]}}},
                    caught(fun() -> lex:with(Rules3, <<"ab\n λ"/utf8, 16#FF>>, Opts) end))].
+
+%% The position update of unboxed mode, from the reversed token
+%% (lex:rev_cols/3, lex:rev_lines/4, lex:ends_in_cr/2), equals advance/3
+%% on the token in order, for random tokens rich in line terminators,
+%% from every kind of starting position
+advance_rev({Line, Col, AfterCR}, RevChars, NL) ->
+    case lex:rev_cols(RevChars, NL, 0) of
+        K when K < 0 -> {Line, Col - K - 1, false};
+        K -> {Line + lex:rev_lines(RevChars, AfterCR, NL, 0), K + 1, lex:ends_in_cr(RevChars, NL)}
+    end.
+
+advance_rev_test() ->
+    rand:seed(exsss, {11, 22, 33}),
+    Chars = [$a, $b, $\n, $\r, $\v, $\f, 16#85, 16#2028, 16#2029, $\s],
+    Bad = [ {Pos, Token, NL}
+            || _ <- lists:seq(1, 20000),
+               Token <- [[ lists:nth(rand:uniform(length(Chars)), Chars)
+                           || _ <- lists:seq(1, rand:uniform(8)) ]],
+               NL <- [unicode, ascii, lf],
+               Pos <- [{1, 1, false}, {3, 1, true}, {7, 5, false}],
+               %% AfterCR is only ever true right after a CR that ended a line
+               element(3, Pos) == false orelse NL =/= lf,
+               advance_rev(Pos, lists:reverse(Token), NL) =/= lex:advance(Pos, Token, NL) ],
+    ?assertEqual([], lists:sublist(Bad, 5)).
