@@ -53,3 +53,10 @@ make test
 Building the table dynamically is fast enough for most uses (a few
 milliseconds for a programming language lexer); use
 `lex:with(Rules, Input)` or keep the result of `lex:regexps_to_table/2`.
+
+## License
+
+MIT; see [LICENSE](LICENSE). The exception is `src/regexp_parse.erl`
+and `src/regexp.erl.txt`, which derive from Ericsson's `regexp.erl`
+and remain under the Erlang Public License 1.1, as stated in their
+headers.
