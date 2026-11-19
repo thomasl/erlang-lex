@@ -1112,6 +1112,95 @@ socket_loop(Sock, C, Acc) ->
 
 %% Every driver, in argument mode, with 1- and 2-argument actions, gives
 %% the same tokens, positions and errors as process mode
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Binary tables ({table, binary})
+
+table_tag(Re, Opts) ->
+    element(1, element(4, lex:regexps_to_table([{regexp, Re, lex:item(t)}], Opts))).
+
+binary_table_width_test_() ->
+    Ident = "\\p{XID_Start}\\p{XID_Continue}*",
+    [?_assertEqual(bin8, table_tag("a|b", [{table, binary}])),
+     ?_assertEqual(bin16, table_tag(Ident, [{encoding, utf8}, {table, binary}])),
+     ?_assertEqual(bin16, table_tag("a|b", [{table, {binary, 16}}])),
+     ?_assertEqual(bin32, table_tag("a|b", [{table, {binary, 32}}])),
+     ?_assertMatch({'EXIT', {table_too_large, _, {binary, 8}}},
+                   caught(fun() -> table_tag(Ident, [{encoding, utf8}, {table, {binary, 8}}]) end)),
+     ?_assertMatch({'EXIT', {unknown_table_option, {binary, 12}}},
+                   caught(fun() -> table_tag("a", [{table, {binary, 12}}]) end))].
+
+%% transition/3 sees the same DFA in every representation, and a binary
+%% table converts back to the same tuples
+binary_table_transitions_test() ->
+    Rules = driver_rules(utf8),
+    Tuple = lex:regexps_to_table(Rules, [{encoding, utf8}]),
+    T = element(4, Tuple),
+    [ begin
+          Bin = lex:regexps_to_table(Rules, [{encoding, utf8}, {table, Rep}]),
+          B = element(4, Bin),
+          ?assertEqual([lex:transition(S, C, T) || S <- lists:seq(1, tuple_size(T)), C <- lists:seq(0, 255)],
+                       [lex:transition(S, C, B) || S <- lists:seq(1, tuple_size(T)), C <- lists:seq(0, 255)]),
+          ?assertEqual(T, element(4, lex:tuple_table(Bin)))
+      end || Rep <- [binary, {binary, 8}, {binary, 16}, {binary, 32}] ].
+
+%% Every driver gives the same tokens, positions and errors with a
+%% binary table of each width as with the tuple table.
+binary_table_equivalence_test_() ->
+    {timeout, 120,
+     fun() ->
+             rand:seed(exsss, {8, 16, 32}),
+             [ begin
+                   Opts = [{encoding, Enc}, {position, Mode}],
+                   Tuple = lex:regexps_to_table(driver_rules(Enc), Opts),
+                   Bins = [ {Rep, lex:regexps_to_table(driver_rules(Enc), [{table, Rep} | Opts])}
+                            || Rep <- [binary, {binary, 8}, {binary, 16}, {binary, 32}] ],
+                   [ begin
+                         Bin = case I rem 2 of 0 -> random_input(Enc); 1 -> valid_input(Enc) end,
+                         Ref = whole(Tuple, Bin),
+                         IoList = random_iolist(Bin),
+                         Chunks = random_chunks(Bin),
+                         [ ?assertEqual({Enc, Mode, Rep, Way, Bin, Ref}, {Enc, Mode, Rep, Way, Bin, caught(F)})
+                           || {Rep, Lex} <- Bins,
+                              {Way, F} <- [{binary, fun() -> whole(Lex, Bin) end},
+                                           {iolist, fun() -> whole(Lex, IoList) end},
+                                           {list, fun() -> whole(Lex, binary_to_list(Bin)) end},
+                                           {feed, fun() -> feed_all(Lex, Chunks) end}]
+                                  ++ [ {Way, F} || Mode == process,
+                                                   {Way, F} <- [{one_more, fun() -> lex:no_lines(),
+                                                                                    pull_more(Lex, <<>>, more_from(Chunks, ended), [])
+                                                                          end},
+                                                                {old_list, fun() -> lex:no_lines(),
+                                                                                    lex:lex_string(Lex, binary_to_list(Bin))
+                                                                          end}] ] ]
+                     end || I <- lists:seq(1, 40) ]
+               end || Enc <- [bytes, latin1 | ?ENCODINGS], Mode <- [process, argument, unboxed] ]
+     end}.
+
+%% Input that lexes without errors: 30-200 tokens of driver_rules/1
+valid_input(Enc) ->
+    Pieces = ["a", "ab", "aab", "b", "cde", "dd", "\"x y\"", " ", "\n", "\r", "\r\n"]
+        ++ case Enc of
+               bytes -> [];
+               latin1 -> [];
+               _ -> [[16#3BB, $c], [16#1F600], [16#2028]]
+           end,
+    Chars = lists:append([lists:nth(rand:uniform(length(Pieces)), Pieces)
+                          || _ <- lists:seq(1, 29 + rand:uniform(171))]),
+    case Enc of
+        bytes -> list_to_binary(Chars);
+        latin1 -> list_to_binary(Chars);
+        _ -> unicode:characters_to_binary(Chars, unicode, Enc)
+    end.
+
+whole(Lex, Input) ->
+    caught(fun() ->
+                   lex:reset_pos(Lex),
+                   case is_binary(Input) of
+                       true -> lex:lex_binary(Lex, Input);
+                       false -> lex:lex_iolist(Lex, Input)
+                   end
+           end).
+
 position_modes_test_() ->
     {timeout, 120,
      fun() ->

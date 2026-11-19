@@ -159,9 +159,14 @@ Compile the rules. `Options` is a list of:
 - `{position, process | argument | unboxed}`: whether the drivers keep
   the line and column in the process dictionary (default) or pass them
   as arguments, see [Position as an argument](#position-as-an-argument)
+- `{table, tuple | binary | {binary, 8 | 16 | 32}}`: how the DFA table
+  is stored; default `tuple`. `binary` uses the smallest entry width
+  that holds the number of states. The binary is smaller and free to
+  share between processes, but lexing is slower; see
+  [Table representation](#table-representation)
 
 Errors in the rules exit here, see [Errors](#errors). The table is
-`{lex, Start, AcceptLimit, Table, Actions, Enc, NL}`; treat it as opaque.
+`{lex, Start, AcceptLimit, Table, Actions, Enc, NL, PosMode}`; treat it as opaque.
 
 ```erlang
 one(LexTable, Input) -> {token, Token, Rest} | end_of_stream
@@ -632,6 +637,8 @@ Raised (as `exit`) by `regexps_to_table/1,2` and `with/2,3`:
 | `{unknown_encoding, Enc}` | bad `{encoding, Enc}` |
 | `{unknown_newline, NL}` | bad `{newline, NL}` |
 | `{unicode_newline_needs_encoding, bytes}` | `{newline, unicode}` with the `bytes` encoding |
+| `{unknown_table_option, Rep}` | bad `{table, Rep}` |
+| `{table_too_large, States, {binary, Bits}}` | `{table, {binary, Bits}}` with too many states for `Bits`-bit entries |
 
 Syntax errors (`Error` above) include `{illegal, Chars}`,
 `{unterminated, What}`, `{char_class, Range}` (bad range such as
@@ -974,65 +981,65 @@ on a 1.6 GHz laptop. The DFA was not minimized then.)
 
 By default the DFA table is a tuple with one row per state, and each row
 is a tuple of 256 next states, so a transition is two `element/2` calls.
-`lex.erl` can instead be compiled with the table as a single binary of
-`States * 256` entries, where the entry for `(State, Byte)` is at index
-`(State - 1) * 256 + Byte`:
+With the option `{table, binary}` it is instead one binary of
+`States * 256` unsigned entries. The entry for `(State, Byte)` is at
+index `(State - 1) * 256 + Byte`, and 0 means no match (states are
+numbered from 1). The entries are 8, 16 or 32 bits wide, the smallest
+that holds the number of states: 8 bits for up to 255 states, 16 for up
+to 65,535. `{table, {binary, Bits}}` sets the width, and exits with
+`{table_too_large, States, {binary, Bits}}` if it is too small.
 
-```sh
-erlc +export_all -DLEX_BINARY_TABLE -o ebin src/lex.erl                     # 16-bit entries
-erlc +export_all -DLEX_BINARY_TABLE -DLEX_TABLE_BITS=32 -o ebin src/lex.erl
-```
-
-Entries are signed integers of `LEX_TABLE_BITS` bits (default 16), so
-"no match" is still -1 and a table holds at most 2^(bits-1) - 1 states;
-a bigger DFA exits with `{table_too_large, States, {max_states, Max}}`.
-8 bits (127 states) is too few for Unicode classes: 69 of the tests
-fail that way. With 16 and 32 bits all tests pass. The tests read
-tables through `lex:transition(State, Byte, Table)`, which works with
-either representation.
+The scan loops exist once for tuples and once for each width, so that
+the width is a constant in the bit-syntax match. A width read at run
+time made each lookup 40-60% slower. The drivers choose the loop when
+they start each token. The tuple loops are the same as before, and the
+benchmark below showed no difference in tuple timings from the extra
+dispatch. `lex:transition(State, Byte, Table)` reads either kind of
+table.
 
 `make bench-table` ([bench/lex_table_bench.erl](../bench/lex_table_bench.erl))
-compares them on an Erlang lexer: keywords, atoms, variables, integers
-in every base, floats, strings, quoted atoms, `$` characters, comments
-and all operators, 44 rules. It comes in an ASCII/Latin-1 version
-(`bytes`) and one with UAX #31 identifiers in UTF-8. The input is this
-repository's Erlang source repeated to 1.17 MB, giving 226,385 tokens.
-Each time is the median of 9 runs, each in a new process, with the table
-built beforehand. Measured on an Apple M4 with Erlang/OTP 29:
+compares the representations on an Erlang lexer: keywords, atoms,
+variables, integers in every base, floats, strings, quoted atoms, `$`
+characters, comments and all operators, 44 rules. It comes in an
+ASCII/Latin-1 version (`bytes`) and one with UAX #31 identifiers in
+UTF-8. The input is this repository's Erlang source repeated to
+1.22 MB: 238,665 tokens, lexed as a binary, a string, and an iolist
+with one binary per line. Each time is the median of 9 runs, each in a
+new process, with the table built beforehand. Measured on an Apple M4
+with Erlang/OTP 29 (run-to-run noise is about 3%):
 
-| | tuple | binary, 16 bits | binary, 32 bits |
-|---|---|---|---|
-| `bytes`: 174 states | | | |
-| table in memory | 359 KB | 89 KB | 178 KB |
-| `term_to_binary` size | 179 KB | 89 KB | 178 KB |
-| give the table to a new process | 67 µs | 0.7 µs | 0.7 µs |
-| lex a binary | 32.0 ms | 41.8 ms | 42.0 ms |
-| lex a string | 33.4 ms | 41.7 ms | 44.0 ms |
-| lex an iolist of lines | 42.4 ms | 66.7 ms | 69.0 ms |
-| `utf8`: 1,147 states | | | |
-| table in memory | 2.37 MB | 587 KB | 1.17 MB |
-| `term_to_binary` size | 1.31 MB | 587 KB | 1.17 MB |
-| give the table to a new process | 436 µs | 0.8 µs | 0.8 µs |
-| lex a binary | 46.1 ms | 49.1 ms | 49.7 ms |
-| lex a string | 40.9 ms | 48.6 ms | 49.3 ms |
-| lex an iolist of lines | 53.8 ms | 91.3 ms | 91.1 ms |
+| | tuple | binary, 8 bits | binary, 16 bits | binary, 32 bits |
+|---|---|---|---|---|
+| `bytes`: 174 states | | (chosen by `binary`) | | |
+| table in memory | 359 KB | 45 KB | 89 KB | 178 KB |
+| `term_to_binary` size | 179 KB | 45 KB | 89 KB | 178 KB |
+| give the table to a new process | 68 µs | 0.6 µs | 0.7 µs | 0.7 µs |
+| lex a binary | 35 ms | 46 ms | 46 ms | 46-47 ms |
+| lex a string | 32-33 ms | 46 ms | 46 ms | 47-48 ms |
+| lex an iolist of lines | 34-35 ms | 81-87 ms | 81-82 ms | 81-82 ms |
+| `utf8`: 1,147 states | | too few states | (chosen by `binary`) | |
+| table in memory | 2.37 MB | | 587 KB | 1.17 MB |
+| `term_to_binary` size | 1.31 MB | | 587 KB | 1.17 MB |
+| give the table to a new process | 455-465 µs | | 0.8 µs | 0.9 µs |
+| lex a binary | 48-49 ms | | 52-55 ms | 52-53 ms |
+| lex a string | 47-48 ms | | 51-52 ms | 52 ms |
+| lex an iolist of lines | 73-75 ms | | 114-117 ms | 114-115 ms |
 
-The 16-bit binary is a quarter of the size of the tuples (512 bytes per
-state instead of 257 words). Since it is a large, reference-counted
-binary, it is never copied: giving it to another process is free. But
-lexing is slower. It takes 7-30% longer on binaries and strings, and
-55-70% longer on iolists of short binaries. A tuple lookup allocates
-nothing, while each binary lookup starts a new match on the table
-(`bs_start_match3`) and so creates a match context on the heap for
-every byte lexed. Inlining the lookup makes no difference.
-`binary:at/2`, which allocates nothing, was slower still in a
-micro-benchmark, since 16 bits take two calls. 32-bit entries cost the
-same time as 16-bit ones and twice the space.
+The binary is 4 to 8 times smaller than the tuples. Since it is a
+large, reference-counted binary, it is never copied, so giving it to
+another process is free. But lexing is slower: 8-42% longer on binaries
+and strings, and 55-140% longer on iolists of short binaries. A tuple
+lookup allocates nothing. Each binary lookup starts a new match on the
+table (`bs_start_match3` in the BEAM code), which creates a match
+context on the heap for every byte lexed. That cost is the same at
+every width, so 8-bit entries only save space. `binary:at/2`, which
+allocates nothing, was slower still in a micro-benchmark. Inlining the
+lookup made no difference.
 
-So the tuple stays the default, and the binary is a compile-time option.
-The binary pays off when one table is shared by many processes or
-stored, where it saves memory and copying. A tuple table can also avoid
-being copied by keeping it in `persistent_term`.
+So `tuple` stays the default. `binary` pays off when one table is
+shared by many processes or stored, where it saves memory and copying.
+A tuple table can also avoid being copied by keeping it in
+`persistent_term`.
 
 ## Lexing corner cases
 
@@ -1214,8 +1221,8 @@ Syntax and semantics of the classes:
   Server Protocol use. Except in the non-blocking incremental interface
   (one position per continuation), the position is kept in the process
   dictionary, so it is per process; actions always read it from there.
-- **Table size.** Every state is a 256-element tuple (or, compiled with
-  `-DLEX_BINARY_TABLE`, 512 bytes of a binary, which is smaller but
+- **Table size.** Every state is a 256-element tuple (or, with
+  `{table, binary}`, 256-1,024 bytes of a binary, which is smaller but
   slower; see [Table representation](#table-representation)). Sparse tables,
   equivalence classes of bytes (as in `flex`), or generating Erlang code
   from the DFA (as `leex` does) would make large and little-endian

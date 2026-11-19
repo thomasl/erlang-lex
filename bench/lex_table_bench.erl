@@ -1,8 +1,6 @@
-%%% Benchmark: the DFA table as a tuple of tuples versus a binary.
-%%%
-%%% lex.erl is compiled once per representation (see the bench-table
-%%% target in the Makefile); this module is run against each build in a
-%%% separate VM and prints one result line per specification and input.
+%%% Benchmark: the DFA table as a tuple of tuples ({table, tuple}, the
+%%% default) versus a binary ({table, binary}, with 8-, 16- or 32-bit
+%%% entries). Run with `make bench-table`.
 %%%
 %%% The specification is a lexer for Erlang (keywords, atoms, variables,
 %%% numbers in all forms, strings, quoted atoms, characters, comments and
@@ -14,59 +12,50 @@
 
 -module(lex_table_bench).
 
--export([run/1, rules/1]).
+-export([run/0, rules/1]).
 
 -define(RUNS, 9).
 -define(CORPUS_BYTES, 1000000).
 
-run([Variant]) ->
+run() ->
     Corpus = corpus(),
-    io:format("~s: corpus ~w bytes~n", [Variant, byte_size(Corpus)]),
-    [spec(Variant, Spec, Corpus) || Spec <- [erlang_bytes, erlang_utf8]],
+    io:format("corpus ~w bytes~n", [byte_size(Corpus)]),
+    [spec(Spec, Corpus) || Spec <- [erlang_bytes, erlang_utf8]],
     ok.
 
-spec(Variant, Spec, Corpus) ->
+spec(Spec, Corpus) ->
     Opts = opts(Spec),
-    {BuildUs, LEX} = timer:tc(fun() -> lex:regexps_to_table(rules(Spec), Opts) end),
-    {lex, _Start, AcceptLimit, Table, _Actions, _Enc, _NL, _Pos} = LEX,
-    States = states(Table),
-    Tokens = length(lex_binary(LEX, Corpus)),
-    io:format("~s ~s: ~w states (~w accepting), ~w tokens~n",
-              [Variant, Spec, States, AcceptLimit, Tokens]),
-    io:format("~s ~s: table ~w bytes in memory, ~w bytes external, built in ~.1f ms~n",
-              [Variant, Spec, memory_bytes(Table), byte_size(term_to_binary(Table)),
-               BuildUs / 1000]),
-    io:format("~s ~s: send table to a new process: ~.1f us~n",
-              [Variant, Spec, send_us(Table)]),
+    Tuple = lex:regexps_to_table(rules(Spec), Opts),
+    States = tuple_size(element(4, Tuple)),
+    io:format("~n~s: ~w states (~w accepting), ~w tokens~n",
+              [Spec, States, element(3, Tuple), length(lex_binary(Tuple, Corpus))]),
+    Reps = [tuple, binary] ++ [{binary, B} || B <- [8, 16, 32], States < 1 bsl B],
+    [variant(Spec, Rep, Opts, Corpus) || Rep <- Reps],
+    ok.
+
+variant(Spec, Rep, Opts, Corpus) ->
+    {BuildUs, LEX} = timer:tc(fun() -> lex:regexps_to_table(rules(Spec), [{table, Rep} | Opts]) end),
+    Table = element(4, LEX),
+    Name = io_lib:format("~s ~w (~w)", [Spec, Rep, kind(Table)]),
+    io:format("~s: table ~w bytes in memory, ~w bytes external, built in ~.1f ms, "
+              "send to a new process ~.1f us~n",
+              [Name, memory_bytes(Table), byte_size(term_to_binary(Table)), BuildUs / 1000,
+               send_us(Table)]),
     Inputs = [{binary, Corpus},
               {string, binary_to_list(Corpus)},
               {iolist, binary:split(Corpus, <<"\n">>, [global])}],
-    [io:format("~s ~s: ~-6s ~6.1f ms (median of ~w)~n",
-               [Variant, Spec, Kind, median_ms(LEX, Input), ?RUNS])
-     || {Kind, Input} <- Inputs],
-    ok.
+    io:format("~s: ~ts~n",
+              [Name, lists:join(", ", [io_lib:format("~s ~.1f ms", [Kind, median_ms(LEX, Input)])
+                                       || {Kind, Input} <- Inputs])]).
 
 opts(erlang_bytes) -> [];
 opts(erlang_utf8) -> [{encoding, utf8}].
 
-%% The number of states, whatever the representation.
-states(Table) when is_tuple(Table) -> tuple_size(Table);
-states(Table) when is_binary(Table) ->
-    byte_size(Table) div (256 * table_bytes(Table)).
+kind({Tag, Bin}) when is_atom(Tag), is_binary(Bin) -> Tag;
+kind(_) -> tuple.
 
-%% Entry width: find it from a known-good lookup (only to count states).
-table_bytes(Table) ->
-    hd([W || W <- [1, 2, 4], byte_size(Table) rem (256 * W) =:= 0,
-             valid(Table, W)]).
-
-valid(Table, W) ->
-    States = byte_size(Table) div (256 * W),
-    Bits = W * 8,
-    lists:all(fun(N) -> N =:= -1 orelse (N >= 1 andalso N =< States) end,
-              [N || <<N:Bits/signed>> <= Table]).
-
-memory_bytes(Table) when is_binary(Table) ->
-    byte_size(Table);                   % off-heap, refcounted
+memory_bytes({_Tag, Bin}) when is_binary(Bin) ->
+    byte_size(Bin);                     % off-heap, refcounted
 memory_bytes(Table) ->
     erts_debug:flat_size(Table) * erlang:system_info(wordsize).
 

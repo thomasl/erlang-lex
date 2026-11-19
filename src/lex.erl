@@ -81,7 +81,7 @@
 	 count_lines/2
 	]).
 
-%% The DFA table, independent of its representation (for tests and tools)
+%% The DFA table, in either representation (for tests and tools)
 -export([transition/3]).
 
 %% ?max_char is currently used to decide the "charset size"
@@ -103,36 +103,18 @@
 -define(pos_key, lex_position).
 
 %% ?no_match is a reserved state indicating error/no match possible.
-%% Both table representations (below) store it as -1.
+%% It is -1 in tuple tables; binary tables (see "Binary tables") use 0.
 
 -define(no_match, -1).
 
 %% For compact tables, the value must be unsigned (which is a drawback).
 
-%% Table representation, chosen at compile time (an experiment, see
-%% doc/README.md, "Table representation"):
-%%
-%% - default: a tuple of rows, one per state; each row is a tuple of 256
-%%   next states. ?next(State, Byte, Table) is two element/2 calls.
-%% - LEX_BINARY_TABLE defined (erlc -DLEX_BINARY_TABLE): one binary of
-%%   States*256 entries, the entry for (State, Byte) at index
-%%   (State-1)*256 + Byte. Each entry is a signed integer of
-%%   LEX_TABLE_BITS bits (default 16), so ?no_match is still -1 and a
-%%   table holds at most 2^(LEX_TABLE_BITS-1)-1 states.
-
--ifdef(LEX_BINARY_TABLE).
--ifndef(LEX_TABLE_BITS).
--define(LEX_TABLE_BITS, 16).
--endif.
--define(table_bytes, (?LEX_TABLE_BITS div 8)).
--define(row_bytes, (256 * ?table_bytes)).
--define(next(State, Byte, Table), bin_next(State, Byte, Table)).
--compile({inline, [bin_next/3]}).
--else.
--define(next(State, Byte, Table), element((Byte) + 1, element(State, Table))).
--endif.
-
 -define(compact_no_match, 255).
+
+%% Binary tables (option {table, binary}), see "Binary tables" below:
+%% the table is {bin8 | bin16 | bin32, Binary}.
+
+-define(is_bin_table_tag(Tag), (Tag == bin8 orelse Tag == bin16 orelse Tag == bin32)).
 
 -ifdef(DEBUG).
 -define(log(Str, Xs), io:format("Log: " ++ Str, Xs)).
@@ -203,7 +185,7 @@ f(File) ->
     binary_to_list(Bin).
 
 lex_string(LEX, Str) ->
-    lex_string(LEX, Str, []).
+    lex_string(tuple_table(LEX), Str, []).
 
 lex_string(LEX, Str, Acc) ->
     case one_list(LEX, Str) of
@@ -251,6 +233,10 @@ one(LEX, IoList) when is_list(IoList) ->
 %% with/2,3 now use the iolist driver for lists, which gives the same
 %% results (the tests check this against one_list/2 and lex_string/2).
 
+one_list({lex, _, _, {Tag, _}, _, _, _, _} = LEX, String) when ?is_bin_table_tag(Tag) ->
+    %% the list drivers only handle tuple tables (converting costs a
+    %% whole table per token; lex_string/2 converts once)
+    one_list(tuple_table(LEX), String);
 one_list(LEX = {lex, _Start, _AcceptLimit, _Table, _Actions, Enc, NL, _PosMode}, String) ->
     try longest_string(LEX, String)
     catch
@@ -554,7 +540,7 @@ lex_binary_a(LEX, Bin, Pos, Acc) ->
 bin_longest(_LEX, <<>>) ->
     end_of_stream;
 bin_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}, Bin) ->
-    case scan(Bin, Start, Table, AcceptLimit, 0, [], 0, 0, []) of
+    case scan_table(Bin, Start, Table, AcceptLimit) of
 	{accept, State, Len, RevAcc} ->
 	    <<_:Len/binary, Rest/binary>> = Bin,
 	    case emit_token(Actions, State, RevAcc) of
@@ -574,7 +560,7 @@ bin_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}
 bin_longest_a(_LEX, <<>>, Pos) ->
     {end_of_stream, Pos};
 bin_longest_a(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}, Bin, Pos) ->
-    case scan(Bin, Start, Table, AcceptLimit, 0, [], 0, 0, []) of
+    case scan_table(Bin, Start, Table, AcceptLimit) of
 	{accept, State, Len, RevAcc} ->
 	    <<_:Len/binary, Rest/binary>> = Bin,
 	    case (element(State, Actions))(RevAcc, Pos) of
@@ -597,7 +583,7 @@ bin_longest_a(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMod
 %% of bytes read before the DFA got stuck (or the input ended).
 
 scan(<<C, Rest/binary>>, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
-    case ?next(State, C, Table) of
+    case element(C+1, element(State, Table)) of
 	?no_match ->
 	    scan_done(N, LastState, LastLen, LastRevAcc);
 	Next when ?is_accepting(Next, AcceptLimit) ->
@@ -711,7 +697,7 @@ lex_iolist_a(LEX, Cur, Stack, Pos, Acc) ->
 %% process mode
 
 io_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}, Cur, Stack) ->
-    case io_eof(io_scan(Cur, Stack, Start, Table, AcceptLimit, 0, [], 0, 0, [])) of
+    case io_eof(io_scan_table(Cur, Stack, Start, Table, AcceptLimit, 0, [], 0, 0, [])) of
 	{accept, State, Len, RevAcc} ->
 	    {Cur1, Stack1} = io_skip(Cur, Stack, Len),
 	    case emit_token(Actions, State, RevAcc) of
@@ -729,7 +715,7 @@ io_longest(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode},
 %% argument mode
 
 io_longest_a(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode}, Cur, Stack, Pos) ->
-    case io_eof(io_scan(Cur, Stack, Start, Table, AcceptLimit, 0, [], 0, 0, [])) of
+    case io_eof(io_scan_table(Cur, Stack, Start, Table, AcceptLimit, 0, [], 0, 0, [])) of
 	{accept, State, Len, RevAcc} ->
 	    {Cur1, Stack1} = io_skip(Cur, Stack, Len),
 	    case (element(State, Actions))(RevAcc, Pos) of
@@ -757,7 +743,7 @@ io_longest_a(LEX = {lex, Start, AcceptLimit, Table, Actions, _Enc, _NL, _PosMode
 
 io_scan([B | T], Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc)
   when is_integer(B), B >= 0, B =< 255 ->
-    case ?next(State, B, Table) of
+    case element(B+1, element(State, Table)) of
 	?no_match ->
 	    io_done(stuck, N, LastState, LastLen, LastRevAcc);
 	Next when ?is_accepting(Next, AcceptLimit) ->
@@ -781,7 +767,7 @@ io_scan(_NotIoData, _Stack, _State, _Table, _AcceptLimit, N, _RevAcc, LastState,
     io_done(stuck, N, LastState, LastLen, LastRevAcc).
 
 io_scan_b(<<C, Rest/binary>>, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
-    case ?next(State, C, Table) of
+    case element(C+1, element(State, Table)) of
 	?no_match ->
 	    io_done(stuck, N, LastState, LastLen, LastRevAcc);
 	Next when ?is_accepting(Next, AcceptLimit) ->
@@ -792,6 +778,146 @@ io_scan_b(<<C, Rest/binary>>, Stack, State, Table, AcceptLimit, N, RevAcc, LastS
     end;
 io_scan_b(<<>>, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
     io_scan([], Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%% Binary tables
+%%
+%% With {table, binary}, the table is {Tag, Bin}: one binary of
+%% States*256 unsigned entries, the next state for (State, Byte) at index
+%% (State-1)*256 + Byte, and 0 for no match (states start at 1). The
+%% entry width is the smallest of 8, 16 and 32 bits that holds the
+%% number of states (or the one given with {table, {binary, Bits}}),
+%% and Tag is bin8, bin16 or bin32.
+%%
+%% The scan loops below are the tuple loops scan/9, io_scan/10 and
+%% io_scan_b/10 with the lookup replaced, generated once per width so
+%% that the width is a constant in the bit syntax (a width read at run
+%% time made each lookup 40-60% slower). The drivers choose the loop
+%% when they start a token: scan_table/4 and io_scan_table/10.
+%% The tuple loops are unchanged. The old list drivers (one_list/2,
+%% lex_string/2, o_longest/2) take tuple tables only and convert.
+
+binary_table(LEX, tuple) ->
+    LEX;
+binary_table({lex, Start, AcceptLimit, Table, Actions, Enc, NL, PosMode}, Rep) ->
+    States = tuple_size(Table),
+    Bits = case Rep of
+	       binary -> hd([B || B <- [8, 16, 32], States < 1 bsl B]);
+	       {binary, B} when States < 1 bsl B -> B;
+	       {binary, B} -> exit({table_too_large, States, {binary, B}})
+	   end,
+    Bin = << <<(case Next of ?no_match -> 0; _ -> Next end):Bits>>
+	     || Row <- tuple_to_list(Table), Next <- tuple_to_list(Row) >>,
+    {lex, Start, AcceptLimit, {bin_table_tag(Bits), Bin}, Actions, Enc, NL, PosMode}.
+
+bin_table_tag(8) -> bin8;
+bin_table_tag(16) -> bin16;
+bin_table_tag(32) -> bin32.
+
+bin_table_bits(bin8) -> 8;
+bin_table_bits(bin16) -> 16;
+bin_table_bits(bin32) -> 32.
+
+%% A binary table back to tuples (for the old list drivers)
+tuple_table({lex, Start, AcceptLimit, {Tag, Bin}, Actions, Enc, NL, PosMode})
+  when ?is_bin_table_tag(Tag) ->
+    Bits = bin_table_bits(Tag),
+    Rows = [list_to_tuple([case Next of 0 -> ?no_match; _ -> Next end
+			   || <<Next:Bits>> <= Row])
+	    || <<Row:(256 * Bits)/bits>> <= Bin],
+    {lex, Start, AcceptLimit, list_to_tuple(Rows), Actions, Enc, NL, PosMode};
+tuple_table(LEX) ->
+    LEX.
+
+scan_table(Bin, Start, {bin8, T}, AcceptLimit) ->
+    scan8(Bin, Start, T, AcceptLimit, 0, [], 0, 0, []);
+scan_table(Bin, Start, {bin16, T}, AcceptLimit) ->
+    scan16(Bin, Start, T, AcceptLimit, 0, [], 0, 0, []);
+scan_table(Bin, Start, {bin32, T}, AcceptLimit) ->
+    scan32(Bin, Start, T, AcceptLimit, 0, [], 0, 0, []);
+scan_table(Bin, Start, Table, AcceptLimit) ->
+    scan(Bin, Start, Table, AcceptLimit, 0, [], 0, 0, []).
+
+io_scan_table(Cur, Stack, State, {bin8, T}, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
+    io_scan8(Cur, Stack, State, T, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc);
+io_scan_table(Cur, Stack, State, {bin16, T}, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
+    io_scan16(Cur, Stack, State, T, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc);
+io_scan_table(Cur, Stack, State, {bin32, T}, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
+    io_scan32(Cur, Stack, State, T, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc);
+io_scan_table(Cur, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
+    io_scan(Cur, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc).
+
+%% The next state of State on byte C, in a table of Bits-bit entries:
+%% binds Next (a macro, so that Bits is a literal in the pattern).
+-define(bin_next(Next, State, C, Table, Bits),
+	<<_:(((State - 1) bsl 8) bor C)/binary-unit:Bits, Next:Bits, _/binary>> = Table).
+
+-define(BIN_SCAN(Scan, Bits),
+Scan(<<C, Rest/binary>>, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
+    ?bin_next(Next, State, C, Table, Bits),
+    case Next of
+	0 ->
+	    scan_done(N, LastState, LastLen, LastRevAcc);
+	_ when ?is_accepting(Next, AcceptLimit) ->
+	    Acc = [C|RevAcc],
+	    Scan(Rest, Next, Table, AcceptLimit, N+1, Acc, Next, N+1, Acc);
+	_ ->
+	    Scan(Rest, Next, Table, AcceptLimit, N+1, [C|RevAcc], LastState, LastLen, LastRevAcc)
+    end;
+Scan(<<>>, _State, _Table, _AcceptLimit, N, _RevAcc, LastState, LastLen, LastRevAcc) ->
+    scan_done(N, LastState, LastLen, LastRevAcc)).
+
+-define(BIN_IO_SCAN(IoScan, IoScanB, Bits),
+IoScan([B | T], Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc)
+  when is_integer(B), B >= 0, B =< 255 ->
+    ?bin_next(Next, State, B, Table, Bits),
+    case Next of
+	0 ->
+	    io_done(stuck, N, LastState, LastLen, LastRevAcc);
+	_ when ?is_accepting(Next, AcceptLimit) ->
+	    Acc = [B|RevAcc],
+	    IoScan(T, Stack, Next, Table, AcceptLimit, N+1, Acc, Next, N+1, Acc);
+	_ ->
+	    IoScan(T, Stack, Next, Table, AcceptLimit, N+1, [B|RevAcc], LastState, LastLen, LastRevAcc)
+    end;
+IoScan([H | T], Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc)
+  when is_list(H); is_binary(H) ->
+    IoScan(H, [T|Stack], State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc);
+IoScan([], [Next | Stack], State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
+    IoScan(Next, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc);
+IoScan([], [], State, _Table, _AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
+    {eof, State, N, RevAcc, LastState, LastLen, LastRevAcc};
+IoScan(Bin, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc)
+  when is_binary(Bin) ->
+    IoScanB(Bin, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc);
+IoScan(_NotIoData, _Stack, _State, _Table, _AcceptLimit, N, _RevAcc, LastState, LastLen, LastRevAcc) ->
+    io_done(stuck, N, LastState, LastLen, LastRevAcc)).
+
+-define(BIN_IO_SCAN_B(IoScanB, IoScan, Bits),
+IoScanB(<<C, Rest/binary>>, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
+    ?bin_next(Next, State, C, Table, Bits),
+    case Next of
+	0 ->
+	    io_done(stuck, N, LastState, LastLen, LastRevAcc);
+	_ when ?is_accepting(Next, AcceptLimit) ->
+	    Acc = [C|RevAcc],
+	    IoScanB(Rest, Stack, Next, Table, AcceptLimit, N+1, Acc, Next, N+1, Acc);
+	_ ->
+	    IoScanB(Rest, Stack, Next, Table, AcceptLimit, N+1, [C|RevAcc], LastState, LastLen, LastRevAcc)
+    end;
+IoScanB(<<>>, Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc) ->
+    IoScan([], Stack, State, Table, AcceptLimit, N, RevAcc, LastState, LastLen, LastRevAcc)).
+
+?BIN_SCAN(scan8, 8).
+?BIN_SCAN(scan16, 16).
+?BIN_SCAN(scan32, 32).
+?BIN_IO_SCAN(io_scan8, io_scan_b8, 8).
+?BIN_IO_SCAN(io_scan16, io_scan_b16, 16).
+?BIN_IO_SCAN(io_scan32, io_scan_b32, 32).
+?BIN_IO_SCAN_B(io_scan_b8, io_scan8, 8).
+?BIN_IO_SCAN_B(io_scan_b16, io_scan16, 16).
+?BIN_IO_SCAN_B(io_scan_b32, io_scan32, 32).
 
 io_eof({eof, _State, N, _RevAcc, LastState, LastLen, LastRevAcc}) ->
     io_done(at_end, N, LastState, LastLen, LastRevAcc);
@@ -980,12 +1106,12 @@ next1(C = #lexc{lex = {lex, Start, AcceptLimit, Table, _, _, _, _PosMode},
     %% a new token: scan from its start, through all the data
     Stack1 = Stack ++ lists:reverse(Tail),
     C1 = C#lexc{stack = Stack1, tail = []},
-    scanned(C1, io_scan(Cur, Stack1, Start, Table, AcceptLimit, 0, [], 0, 0, []));
+    scanned(C1, io_scan_table(Cur, Stack1, Start, Table, AcceptLimit, 0, [], 0, 0, []));
 next1(C = #lexc{lex = {lex, _Start, AcceptLimit, Table, _, _, _, _PosMode},
 		scan = {State, N, RevAcc, LastState, LastLen, LastRevAcc}, new = New}) ->
     %% resume the scan with the chunks fed since it stopped
     C1 = C#lexc{scan = none, new = []},
-    scanned(C1, io_scan(lists:reverse(New), [], State, Table, AcceptLimit,
+    scanned(C1, io_scan_table(lists:reverse(New), [], State, Table, AcceptLimit,
 			N, RevAcc, LastState, LastLen, LastRevAcc)).
 
 scanned(C = #lexc{lex = {lex, _Start, _AcceptLimit, Table, _, _, _, _PosMode}, ended = Ended},
@@ -1128,21 +1254,17 @@ no_more() ->
 %% true if State has no transitions: an accepted token ending in it
 %% cannot be extended
 
--ifdef(LEX_BINARY_TABLE).
-dead_state(State, Table) ->
-    Row = binary:part(Table, (State - 1) * ?row_bytes, ?row_bytes),
-    Row =:= << <<?no_match:?LEX_TABLE_BITS/signed>> || _ <- lists:seq(0, 255) >>.
--else.
+dead_state(State, {Tag, Bin}) when ?is_bin_table_tag(Tag) ->
+    Size = 256 * bin_table_bits(Tag),
+    <<_:((State - 1) * Size)/bits, Row:Size/bits, _/bits>> = Bin,
+    Row =:= <<0:Size>>;
 dead_state(State, Table) ->
     dead_row(element(State, Table), ?max_char + 1).
--endif.
 
--ifndef(LEX_BINARY_TABLE).
 dead_row(_Row, 0) ->
     true;
 dead_row(Row, I) ->
     element(I, Row) == ?no_match andalso dead_row(Row, I-1).
--endif.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -1161,7 +1283,7 @@ lex_binary_u(_LEX, <<>>, _Line, _Col, _AfterCR, Acc) ->
     lists:reverse(Acc);
 lex_binary_u(LEX = {lex, Start, AcceptLimit, Table, {unboxed, Actions, _}, Enc, _NL, _},
 	     Bin, Line, Col, AfterCR, Acc) ->
-    case scan(Bin, Start, Table, AcceptLimit, 0, [], 0, 0, []) of
+    case scan_table(Bin, Start, Table, AcceptLimit) of
 	{accept, State, Len, RevAcc} ->
 	    <<_:Len/binary, Rest/binary>> = Bin,
 	    RevChars = rev_chars(Enc, RevAcc),
@@ -1181,7 +1303,7 @@ lex_binary_u(LEX = {lex, Start, AcceptLimit, Table, {unboxed, Actions, _}, Enc, 
 
 lex_iolist_u(LEX = {lex, Start, AcceptLimit, Table, {unboxed, Actions, _}, Enc, _NL, _},
 	     Cur, Stack, Line, Col, AfterCR, Acc) ->
-    case io_eof(io_scan(Cur, Stack, Start, Table, AcceptLimit, 0, [], 0, 0, [])) of
+    case io_eof(io_scan_table(Cur, Stack, Start, Table, AcceptLimit, 0, [], 0, 0, [])) of
 	{accept, State, Len, RevAcc} ->
 	    Rest = io_skip(Cur, Stack, Len),
 	    RevChars = rev_chars(Enc, RevAcc),
@@ -1294,6 +1416,10 @@ regexps_to_table(Regexp_rules0) ->
 %%     line and column (default process); see "Line and column counting"
 %%     below
 %%
+%%   {table, tuple | binary | {binary, 8 | 16 | 32}}  how the DFA table
+%%     is represented (default tuple); binary picks the smallest entry
+%%     width that holds the states; see "Binary tables" below
+%%
 %%   {newline, NL}  which characters end a line, for line and column
 %%     counting (see "Line and column counting" below):
 %%     unicode  LF, VT, FF, CR, CR LF, NEL, LS, PS (UTS #18 RL1.6);
@@ -1313,11 +1439,12 @@ regexps_to_table(Regexp_rules0, Opts) ->
     Fold = proplists:get_bool(case_insensitive, Opts),
     NL = newline_option(Enc, proplists:get_value(newline, Opts, default)),
     PosMode = position_option(proplists:get_value(position, Opts, process)),
+    TableRep = table_option(proplists:get_value(table, Opts, tuple)),
     Regexp_rules = regexps_to_internal(Regexp_rules0, {Enc, Fold}),
     NFA = regexps_to_nfa(Regexp_rules),
     DFA = minimize_dfa(nfa_to_dfa(NFA)),
     Lex_table = dfa_to_table(DFA, Regexp_rules, Enc, NL, PosMode),
-    Lex_table.
+    binary_table(Lex_table, TableRep).
 
 %% In bytes mode the input may be UTF-8, where 16#85 (NEL in Unicode)
 %% is a continuation byte, so only the ASCII terminators are allowed.
@@ -1332,6 +1459,11 @@ newline_option(_Enc, NL) -> exit({unknown_newline, NL}).
 
 position_option(Mode) when Mode == process; Mode == argument; Mode == unboxed -> Mode;
 position_option(Mode) -> exit({unknown_position_mode, Mode}).
+
+table_option(tuple) -> tuple;
+table_option(binary) -> binary;
+table_option({binary, Bits} = Rep) when Bits == 8; Bits == 16; Bits == 32 -> Rep;
+table_option(Other) -> exit({unknown_table_option, Other}).
 
 %% Convert all regexp rules to internal form
 %%
@@ -2180,19 +2312,7 @@ generate_table(DFA) ->
     States = lists:keysort(
 	       1,
 	       [ {ID, state(ID, DFA)} || ID <- states_of(DFA) ]),
-    table_from_rows([ generate_row(State) || State <- States ]).
-
--ifdef(LEX_BINARY_TABLE).
-table_from_rows(Rows) ->
-    Max = (1 bsl (?LEX_TABLE_BITS - 1)) - 1,
-    case length(Rows) of
-	N when N > Max -> exit({table_too_large, N, {max_states, Max}});
-	_ -> << <<Next:?LEX_TABLE_BITS/signed>> || Row <- Rows, Next <- tuple_to_list(Row) >>
-    end.
--else.
-table_from_rows(Rows) ->
-    list_to_tuple(Rows).
--endif.
+    list_to_tuple([ generate_row(State) || State <- States ]).
 
 %% each row is the transition function for the corresponding state,
 %% a tuple of ?maxchar elements
@@ -2320,6 +2440,8 @@ rename_state(_X, [], Map) ->
 %%
 %% A sequence is a string (list of char) or a binary
 
+o_longest({lex, _, _, {Tag, _}, _, _, _, _} = Lex, Seq) when ?is_bin_table_tag(Tag) ->
+    o_longest(tuple_table(Lex), Seq);
 o_longest(Lex = {lex, _, _, _, _, Enc, NL, _PosMode}, Seq) when is_list(Seq) ->
     try o_longest_string(Lex, Seq)
     catch
@@ -2476,32 +2598,22 @@ o_post_accept("", _Acc, AccSt, _State, _Nxt, Table,
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+%% transition(State, Byte, Table) -> NextState | -1 (no match), where
+%% Table is element 4 of a {lex, ...} table, in either representation.
+
+transition(State, Byte, {Tag, Bin}) when ?is_bin_table_tag(Tag) ->
+    Bits = bin_table_bits(Tag),
+    <<_:(((State - 1) * 256 + Byte) * Bits)/bits, Next:Bits, _/bits>> = Bin,
+    case Next of
+	0 -> ?no_match;
+	_ -> Next
+    end;
+transition(State, Byte, Table) ->
+    element(Byte + 1, element(State, Table)).
+
 %% Anything that is not a byte (e.g., a code point > 255 in a list) can
 %% never match; it is reported by report_no_match/3.
 
-%% transition(State, Byte, Table) -> NextState | -1 (no match), where
-%% Table is element 4 of the {lex, ...} table tuple.
-
-transition(State, Byte, Table) ->
-    ?next(State, Byte, Table).
-
--ifdef(LEX_BINARY_TABLE).
-bin_next(State, Byte, Table) ->
-    Skip = ((State - 1) bsl 8) bor Byte,
-    <<_:Skip/binary-unit:?LEX_TABLE_BITS, Next:?LEX_TABLE_BITS/signed, _/binary>> = Table,
-    Next.
-
-%% The row is a sub-binary of the table.
-next_state(Char, Row)
-  when is_integer(Char), Char >= ?min_char, Char =< ?max_char ->
-    <<_:Char/binary-unit:?LEX_TABLE_BITS, Next:?LEX_TABLE_BITS/signed, _/binary>> = Row,
-    Next;
-next_state(_Char, _Row) ->
-    ?no_match.
-
-transition_table(State, Table) ->
-    binary:part(Table, (State - 1) * ?row_bytes, ?row_bytes).
--else.
 next_state(Char, Trans_table)
   when is_integer(Char), Char >= ?min_char, Char =< ?max_char ->
     element(Char+1, Trans_table);
@@ -2512,7 +2624,6 @@ next_state(_Char, _Trans_table) ->
 
 transition_table(State, Table) ->
     element(State, Table).
--endif.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
