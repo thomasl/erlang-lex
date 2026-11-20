@@ -241,6 +241,9 @@ try pull(Lex, Bin, []) after process_flag(min_bin_vheap_size, Old) end
 or lex in a process spawned with
 `spawn_opt(Fun, [{min_bin_vheap_size, 2 * Words}])`.
 
+Copying the input to the heap first, or lexing it in fragments, was
+also measured; see [Garbage collection experiments](#garbage-collection-experiments).
+
 ### Iolist input
 
 A list is lexed as iodata, the type of `iolist_to_binary/1` and of most
@@ -1060,6 +1063,92 @@ So `tuple` stays the default. `binary` pays off when one table is
 shared by many processes or stored, where it saves memory and copying.
 A tuple table can also avoid being copied by keeping it in
 `persistent_term`.
+
+### Garbage collection experiments
+
+`with/2,3` raises `min_bin_vheap_size` and `min_heap_size` while it
+lexes a binary (see [Binary input](#binary-input)). Two other
+approaches were tried, to see if the problem can be avoided instead:
+copy the input to the process heap first, or feed it to the
+incremental API in fragments. A binary larger than 64 bytes is never
+stored on the process heap; `binary:copy/1` of a 1 KB part makes
+another off-heap binary. So "on the heap" means a byte list
+(`binary_to_list/1`, 16 bytes per input byte) or binaries of at most 64
+bytes (heap binaries, 10 words for 64 bytes).
+
+`make bench-gc` ([bench/lex_gc_bench.erl](../bench/lex_gc_bench.erl))
+runs the Erlang lexer from [Table representation](#table-representation)
+on this repository's source, cut to 4 KB to 1 MB. Each run is a new
+process that gets the input binary in a message, as from a caller, and
+the table built beforehand. GC counts and sizes come from a separate,
+traced run. The variants:
+
+| Variant | |
+|---|---|
+| `binary_default` | lex the binary with default GC settings |
+| `binary_tuned` | the same with the GC limits of `with/3` (the current method) |
+| `byte_list` | `binary_to_list/1`, then lex the list |
+| `heap_binaries` | split into 64-byte binaries, then lex that iolist |
+| `copy_F` | incremental API, fed `binary:copy/1` fragments of F bytes (64 B to 64 KB) made from the input in the same process |
+| `subbin_4K` | the same with 4 KB sub-binaries, not copied |
+| `producer_F` | incremental API, fed fragments of F bytes (1 KB to 64 KB) copied by another process that holds the input, as when reading a file or socket |
+
+Median time in ms, as a range over three runs. The GC columns are for
+1 MB. "Copied" is the data moved by all GCs, and "old bin" is the
+largest total of off-heap binaries on the old heap after a GC. Measured
+on an Apple M4 with Erlang/OTP 29:
+
+| Variant | 64 KB | 256 KB | 512 KB | 1 MB | major GCs | copied | old bin | peak heap |
+|---|---|---|---|---|---|---|---|---|
+| `binary_default` | 1.74-1.76 | 7.2-7.4 | 37 | 93 | 39 | 425 MB | 1 MB | 32.7 MB |
+| `binary_tuned` | 1.40-1.41 | 6.3-6.4 | 13.0-13.6 | 30.4-30.5 | 2 | 41 MB | 1 MB | 42.8 MB |
+| `byte_list` | 1.68-1.83 | 6.9-7.0 | 16.9-17.0 | 35.7-36.0 | 2 | 83 MB | 0 | 42.8 MB |
+| `heap_binaries` | 1.91-1.92 | 7.8-8.0 | 17.6-23.9 | 41.4-42.0 | 7 | 80 MB | 1 MB | 20.2 MB |
+| `copy_64` | 2.46-2.54 | 10.6-15.1 | 75-76 | 190-191 | 79 | 792 MB | 1 MB | 28.8 MB |
+| `copy_4K` | 2.10-2.18 | 8.9-9.2 | 67.3-67.7 | 170 | 75 | 730 MB | 1 MB | 29.8 MB |
+| `copy_64K` | 2.09-2.18 | 10.6-11.0 | 59.5-59.9 | 175 | 73 | 709 MB | 1.1 MB | 23.5 MB |
+| `subbin_4K` | 2.12-2.20 | 9.0-9.3 | 67.5-75.1 | 170-172 | 75 | 730 MB | 1 MB | 25.9 MB |
+| `producer_4K` | 2.11-2.17 | 9.0-9.2 | 20.5-20.7 | 48.9-49.7 | 6 | 79 MB | 0.1 MB | 20.2 MB |
+| `producer_64K` | 2.13-2.17 | 8.9-9.1 | 20.1-20.5 | 51.9-52.1 | 6 | 78 MB | 0.4 MB | 20.2 MB |
+
+At 4 KB every variant took 0.15-0.21 ms. At 16 KB the binary took
+0.33-0.36 ms and the others 0.41-0.67 ms. For small inputs, about
+360 KB of each heap is the table, which is copied into the process.
+
+What this shows:
+
+- **The cause is a large input binary on the old heap.** Below
+  `min_bin_vheap_size` (371 KB by default) there is no effect: at
+  256 KB, default and tuned differ by 15%, which is heap growth. Above
+  it, the input moves to the old heap at the first GCs, and from then
+  on most GCs are full sweeps that copy every token made so far: 39
+  full GCs and 425 MB copied for 1 MB of input.
+- **Fragments made in the lexing process make it worse**, about twice
+  as slow as doing nothing, at every fragment size. The process still
+  refers to the whole input while it makes the fragments, so the input
+  stays on the old heap. The incremental API and the copies add
+  garbage, which means more GCs, and most of them are full. Sub-binaries
+  without copying are no better, so copying is not the cost. Holding
+  the input is.
+- **Fragments from another process work without tuning.** With 4-6
+  full GCs and 20 MB peak heap, it is half the memory of the current
+  method. It takes about 60% longer at 1 MB, which is the incremental
+  API's overhead (about 25% even for small inputs) and the heap
+  growing from its default size. The fragment size makes little
+  difference between 1 KB and 64 KB. This is the case of a file read in
+  chunks (`from_file/1` in the examples): it needs no GC tuning.
+- **Copying the whole input to the heap also works without tuning.** A
+  byte list is the closest to the current method, 18% slower at 1 MB,
+  and as large. Heap binaries take 36% longer, with half the peak heap.
+  Either way the original binary must not be kept, which is easy for
+  `with/3` but not for a caller who still needs it.
+- **The current method is the fastest at every size**, at the cost of
+  the largest heap, since it sets the heap to 2 words per input byte up
+  front.
+
+So `with/3` keeps raising the limits. For input that arrives in
+fragments, the incremental API needs no tuning, as long as the lexing
+process does not also hold the whole input.
 
 ## Lexing corner cases
 

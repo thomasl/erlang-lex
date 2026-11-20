@@ -32,3 +32,10 @@ clean:
 bench-table: all
 	erlc -I src -o ebin bench/lex_table_bench.erl
 	erl -noshell -pa ebin -eval 'lex_table_bench:run(), halt().'
+
+# Garbage collection when lexing a binary: the current GC limits versus
+# copying the input to the heap or lexing it in fragments (see
+# doc/README.md, "Garbage collection experiments").
+bench-gc: all
+	erlc -I src -o ebin bench/lex_table_bench.erl bench/lex_gc_bench.erl
+	erl -noshell -pa ebin -eval 'lex_gc_bench:run(), halt().'
