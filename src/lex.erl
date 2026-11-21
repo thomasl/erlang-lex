@@ -1664,14 +1664,44 @@ elem_set(C, Ctx) when is_integer(C) ->
     fold_set([{C, C}], Ctx);
 elem_set({From, To}, Ctx) when is_integer(From), is_integer(To) ->
     fold_set([{From, To}], Ctx);
-elem_set({prop, Neg, Name}, Ctx) ->
-    negate(Neg, fold_set(named_set(lex_unicode:property(Name)), Ctx));
-elem_set({posix, Neg, Name}, {Enc, _} = Ctx) ->
+elem_set({prop, Neg, Name} = Class, Ctx) ->
+    Set = negate(Neg, fold_set(named_set(lex_unicode:property(Name)), Ctx)),
+    %% a script class is judged by the script's own characters, without
+    %% the extensions it shares with other scripts (U+00B7 for Greek)
+    Own = case lex_unicode:script_set(Name) of
+	      {ok, Script} -> negate(Neg, fold_set(Script, Ctx));
+	      none -> Set
+	  end,
+    latin1_subset(Class, Ctx, Own),
+    Set;
+elem_set({posix, Neg, Name} = Class, {Enc, _} = Ctx) ->
     Charset = case lex_unicode:is_unicode(Enc) of
 		  true -> unicode;
 		  false -> ascii
 	      end,
-    negate(Neg, fold_set(named_set(lex_unicode:posix_class(Name, Charset)), Ctx)).
+    Set = negate(Neg, fold_set(named_set(lex_unicode:posix_class(Name, Charset)), Ctx)),
+    latin1_subset(Class, Ctx, Set),
+    Set.
+
+%% In latin1, a named or POSIX class stands for its latin1 members
+%% (lower_set/2 drops the rest). A class with none of its own, such as
+%% \p{Greek} or \p{InCyrillic}, maps to characters latin1 cannot
+%% represent: an error.
+
+latin1_subset(Class, {latin1, _}, Set) ->
+    case lex_unicode:intersect(Set, [{0, 255}]) of
+	[] -> exit({unencodable_class, class_text(Class), latin1,
+		    "this class has no characters in latin1 (0-255); "
+		    "use {encoding, utf8} (or utf16, utf32)"});
+	_ -> ok
+    end;
+latin1_subset(_Class, _Ctx, _Set) ->
+    ok.
+
+class_text({prop, Neg, Name}) ->
+    [$\\, case Neg of true -> $P; false -> $p end, ${ | Name] ++ "}";
+class_text({posix, Neg, Name}) ->
+    "[:" ++ [$^ || Neg] ++ Name ++ ":]".
 
 named_set({ok, Set}) -> Set;
 named_set({error, Reason}) -> exit(Reason).

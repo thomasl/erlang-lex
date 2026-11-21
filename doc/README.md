@@ -644,6 +644,7 @@ Raised (as `exit`) by `regexps_to_table/1,2` and `with/2,3`:
 | `{unknown_posix_class, Name}` | bad `[:name:]` |
 | `{unencodable_char, CodePoint, Enc}` | a character the encoding cannot represent, e.g. a surrogate |
 | `{unencodable_char, CodePoint, latin1, Note}` | a character above 255 in a `latin1` regexp, alone, in a class or as a range end; `Note` suggests a Unicode encoding |
+| `{unencodable_class, Class, latin1, Note}` | a named class with no characters of its own in `latin1`, such as `\p{Greek}`; `Note` suggests a Unicode encoding |
 | `{unknown_encoding, Enc}` | bad `{encoding, Enc}` |
 | `{unknown_newline, NL}` | bad `{newline, NL}` |
 | `{unicode_newline_needs_encoding, bytes}` | `{newline, unicode}` with the `bytes` encoding |

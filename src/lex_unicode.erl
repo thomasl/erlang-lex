@@ -32,6 +32,7 @@
 -export([normalize_encoding/1,
          is_unicode/1,
          property/1,
+         script_set/1,
          posix_class/2,
          case_closure/1,
          ascii_case_closure/1,
@@ -162,6 +163,53 @@ bare(L, Orig) ->
                         _ -> {error, {unknown_property, Orig}}
                     end
             end
+    end.
+
+%% script_set(Name) -> {ok, Set} | none
+%%
+%% If the property name means Script_Extensions (a bare script name such
+%% as "Greek", or scx=/Script_Extensions=), the set of the same Script
+%% value without the extensions, which add characters shared with other
+%% scripts (such as U+00B7 for Greek and Han); otherwise none. Used to
+%% decide whether a script class has characters of its own in latin1.
+script_set(Name0) ->
+    Name = string:trim(Name0),
+    case Name of
+        [$^ | Rest] ->
+            case script_set(Rest) of
+                {ok, Set} -> {ok, complement(Set)};
+                none -> none
+            end;
+        _ ->
+            case split_prop(Name) of
+                {P, V} ->
+                    case loose(P) of
+                        LP when LP == "scx"; LP == "scriptextensions" -> sc_set(loose(V));
+                        _ -> none
+                    end;
+                none ->
+                    bare_script(loose(Name))
+            end
+    end.
+
+bare_script(L) ->
+    case special(L) =:= undefined andalso first_found([gc], L) =:= undefined of
+        false -> none;
+        true ->
+            case lex_unicode_data:canonical(scx, L) of
+                undefined ->
+                    case L of
+                        "is" ++ L1 when L1 =/= [] -> bare_script(L1);
+                        _ -> none
+                    end;
+                _ -> sc_set(L)
+            end
+    end.
+
+sc_set(L) ->
+    case lex_unicode_data:canonical(sc, L) of
+        undefined -> none;
+        Canon -> {ok, lex_unicode_data:ranges(sc, Canon)}
     end.
 
 first_found([Kind | Kinds], L) ->

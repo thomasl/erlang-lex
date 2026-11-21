@@ -1193,6 +1193,28 @@ latin1_regexp_chars_test_() ->
      ?_assertMatch({'EXIT', {unencodable_char, 16#100, latin1, _}}, E("[^\\x{100}]")),
      ?_assertMatch({'EXIT', {unencodable_char, 955, latin1, _}}, E("(?i)x|[^aλ]+"))].
 
+%% latin1: a named or POSIX class is its latin1 subset; one with no
+%% characters of its own in latin1 is an error (a script is judged
+%% without the characters it shares with others, so \p{Greek} is
+%% rejected although its Script_Extensions include U+00B7)
+latin1_named_classes_test_() ->
+    E = fun(Re) -> caught(fun() -> table(Re, latin1) end) end,
+    In = fun(Re, Chars) -> T = table(Re, latin1), [C || C <- Chars, not accepts(T, [C])] end,
+    Out = fun(Re, Chars) -> T = table(Re, latin1), [C || C <- Chars, accepts(T, [C])] end,
+    [?_assertMatch({'EXIT', {unencodable_class, Re, latin1, _}}, E(Re))
+     || Re <- ["\\p{Greek}", "\\p{scx=Greek}", "\\p{sc=Greek}", "\\p{IsGreek}", "\\p{Han}",
+               "\\p{Cyrillic}", "\\p{InCyrillic}"]]
+    ++ [?_assertMatch({'EXIT', {unencodable_class, "\\p{Greek}", latin1, _}}, E("[a\\p{Greek}]")),
+        %% subsets
+        ?_assertEqual([], In("[[:alpha:]]", "AzÀéÿª")),
+        ?_assertEqual([], Out("[[:alpha:]]", "1 ×÷_")),
+        ?_assertEqual([], In("\\p{Latin}", "Azé")),
+        ?_assertEqual([], Out("\\p{Latin}", "1 ")),
+        ?_assertEqual([], In("\\w", "a1_é")),
+        ?_assertEqual([], In("\\P{Greek}", "aé1 ")),
+        ?_assertEqual([], In("\\p{Lu}", "AÀÞ")),
+        ?_assertEqual([], Out("\\p{Lu}", "aßÿ"))].
+
 safe_literal_forms_test_() ->
     Text = "a+(λ)?",
     Lex = fun(Re) -> lex:with([{regexp, Re, lex:item(t)}], unicode:characters_to_binary(Text),

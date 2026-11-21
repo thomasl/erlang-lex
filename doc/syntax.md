@@ -367,8 +367,8 @@ The encoding is chosen with `{encoding, Enc}` (default `bytes`); see
 | regexp characters | ASCII characters and escapes are bytes; a non-ASCII character is its UTF-8 bytes, as a unit | latin1 only (0-255); others are an error | code points 0-10FFFF |
 | `\x{...}` | up to `FF` | up to `FF` | up to `10FFFF`, no surrogates |
 | `\d \s \w` | DEL, space, `w` | Unicode classes | Unicode classes |
-| `\p{...}` | not available | yes (restricted to 0-255) | yes |
-| POSIX classes | ASCII | Unicode, restricted to 0-255 | Unicode |
+| `\p{...}` | not available | its latin1 members; none: an error | yes |
+| POSIX classes | ASCII | Unicode, restricted to latin1 | Unicode |
 | case folding | ASCII | Unicode, restricted to 0-255 | Unicode |
 | `.`, `[^...]` | one byte | one byte | one whole character |
 | input | bytes (string of chars 0-255, or binary) | bytes | bytes in that encoding |
@@ -384,9 +384,25 @@ character in a regexp must be in Latin-1 (0-255): on its own, in a
 class (negated or not), or as a range end. Any other character, such
 as `λ`, `[λ]`, `[^λ]` or `[a-λ]`, is an error,
 `{unencodable_char, CodePoint, latin1, Note}`, where `Note` says to use
-`{encoding, utf8}` (or `utf16`, `utf32`) instead. Named and POSIX
-classes such as `\p{L}` are sets, not characters you write, so they are
-allowed and restricted to 0-255.
+`{encoding, utf8}` (or `utf16`, `utf32`) instead.
+
+Named classes follow the same idea:
+
+- A class that is well defined for latin1 stands for its latin1
+  members. That includes the POSIX classes, `\d` `\s` `\w`, general
+  categories such as `\p{L}` or `\p{Lu}`, and scripts and blocks with
+  latin1 characters, such as `\p{Latin}` or `\p{InLatin1}`. For
+  example, `[[:alpha:]]` matches `A`-`Z`, `a`-`z`, `ª`, `µ`, `º`,
+  `À`-`ÿ` except `×` and `÷`.
+- A class with no characters of its own in latin1 is an error,
+  `{unencodable_class, Class, latin1, Note}`, for example `\p{Greek}`,
+  `\p{Han}`, `\p{Cyrillic}` or `\p{InCyrillic}`, also inside brackets.
+  A script is judged by its own characters (`sc`). The extensions that
+  bare script names include (`scx`, [section 6](#6-named-unicode-classes-p))
+  are characters shared with other scripts, such as U+00B7 MIDDLE DOT
+  for Greek and Han, and do not count.
+- The check applies to the class as written, with `\P` or `[:^...:]`, so
+  `\P{Greek}` is allowed: it has latin1 members.
 
 **Non-ASCII characters in `bytes` mode.** The lexer reads bytes, so a
 non-ASCII character in a regexp stands for its UTF-8 bytes. They form
