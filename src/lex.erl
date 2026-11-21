@@ -1670,9 +1670,14 @@ elem_set({From, To}, Ctx) when is_integer(From), is_integer(To) ->
 elem_set({prop, Neg, Name}, Ctx) ->
     negate(Neg, fold_set(named_set(lex_unicode:property(Name)), Ctx));
 elem_set({posix, Neg, Name}, {Enc, _} = Ctx) ->
-    Charset = case lex_unicode:is_unicode(Enc) of
-		  true -> unicode;
-		  false -> ascii
+    %% bytes and latin1 use the ASCII POSIX classes, as defined by POSIX;
+    %% the Unicode encodings use Perl's Unicode versions
+    Charset = case Enc of
+		  latin1 -> ascii;
+		  _ -> case lex_unicode:is_unicode(Enc) of
+			   true -> unicode;
+			   false -> ascii
+		       end
 	      end,
     negate(Neg, fold_set(named_set(lex_unicode:posix_class(Name, Charset)), Ctx)).
 

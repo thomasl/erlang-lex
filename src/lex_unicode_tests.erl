@@ -1193,6 +1193,32 @@ latin1_regexp_chars_test_() ->
      ?_assertMatch({'EXIT', {unencodable_char, 16#100, latin1, _}}, E("[^\\x{100}]")),
      ?_assertMatch({'EXIT', {unencodable_char, 955, latin1, _}}, E("(?i)x|[^aλ]+"))].
 
+%% latin1 uses the ASCII POSIX classes: the 12 of the POSIX standard
+%% and the [:word:] extension, as in the table of
+%% https://www.regular-expressions.info/posixbrackets.html. Each must
+%% match exactly these bytes of the 256 (so no Latin-1 letters).
+latin1_posix_ascii_test_() ->
+    R = fun(F, T) -> lists:seq(F, T) end,
+    Table = [{"alnum", R($a, $z) ++ R($A, $Z) ++ R($0, $9)},
+             {"alpha", R($a, $z) ++ R($A, $Z)},
+             {"blank", " \t"},
+             {"cntrl", R(0, 16#1F) ++ [16#7F]},
+             {"digit", R($0, $9)},
+             {"graph", R(16#21, 16#7E)},
+             {"lower", R($a, $z)},
+             {"print", R(16#20, 16#7E)},
+             {"punct", "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"},
+             {"space", " \t\r\n\v\f"},
+             {"upper", R($A, $Z)},
+             {"word", R($A, $Z) ++ R($a, $z) ++ R($0, $9) ++ "_"},
+             {"xdigit", R($A, $F) ++ R($a, $f) ++ R($0, $9)}],
+    [?_assertEqual({Name, lists:sort(Chars)}, {Name, latin1_members("[[:" ++ Name ++ ":]]")})
+     || {Name, Chars} <- Table]
+    ++ [?_assertEqual({Name, lists:seq(0, 255) -- Chars}, {Name, latin1_members("[[:^" ++ Name ++ ":]]")})
+        || {Name, Chars} <- Table]
+    %% case folding stays within ASCII here
+    ++ [?_assertEqual(R($A, $Z) ++ R($a, $z), latin1_members("(?i)[[:upper:]]"))].
+
 %% latin1: a named or POSIX class is its latin1 subset; one with no
 %% characters of its own in latin1 is an error (a script is judged
 %% without the characters it shares with others, so \p{Greek} is
@@ -1206,8 +1232,9 @@ latin1_named_classes_test_() ->
                "\\p{Cyrillic}", "\\p{InCyrillic}"]]
     ++ [?_assertMatch({'EXIT', {unencodable_class, "\\p{Greek}", latin1, _}}, E("[a\\p{Greek}]")),
         %% subsets
-        ?_assertEqual([], In("[[:alpha:]]", "AzÀéÿª")),
-        ?_assertEqual([], Out("[[:alpha:]]", "1 ×÷_")),
+        ?_assertEqual([], In("[[:alpha:]]", "Az")),
+        ?_assertEqual([], Out("[[:alpha:]]", "1 ×÷_Àéÿª")),
+        ?_assertEqual([], In("\\p{L}", "AzÀéÿª")),
         ?_assertEqual([], In("\\p{Latin}", "Azé")),
         ?_assertEqual([], Out("\\p{Latin}", "1 ")),
         ?_assertEqual([], In("\\w", "a1_é")),

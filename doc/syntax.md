@@ -214,9 +214,11 @@ Inside brackets: `[[:alpha:]_]`, `[[:^digit:]]`. Outside brackets,
 
 The bytes-mode classes are the Unicode classes restricted to ASCII; the
 tests check that these equal the POSIX "C" locale classes ([POSIX]
-chapter 7, LC_CTYPE). In `latin1`, the Unicode
-definitions are used for the code points 0-255. Unknown names are an
-error: `{unknown_posix_class, Name}`.
+chapter 7, LC_CTYPE). `latin1` uses the same ASCII classes, the 12
+classes of the POSIX standard plus `word` (see the table in
+[regular-expressions.info](https://www.regular-expressions.info/posixbrackets.html)).
+So a Latin-1 letter such as `é` is not `[:alpha:]`; use `\p{L}` for
+that. Unknown names are an error: `{unknown_posix_class, Name}`.
 
 The Unicode definitions are Perl's ([perlrecharclass]). They are the
 "Standard Recommendation" of [UTS #18] Annex C, except for `punct`
@@ -368,7 +370,7 @@ The encoding is chosen with `{encoding, Enc}` (default `bytes`); see
 | `\x{...}` | up to `FF` | up to `FF` | up to `10FFFF`, no surrogates |
 | `\d \s \w` | DEL, space, `w` | Unicode classes | Unicode classes |
 | `\p{...}` | not available | its latin1 members; none: an error | yes |
-| POSIX classes | ASCII | Unicode, restricted to latin1 | Unicode |
+| POSIX classes | ASCII | ASCII | Unicode |
 | case folding | ASCII | Unicode, restricted to 0-255 | Unicode |
 | `.`, `[^...]` | one byte | one byte | one whole character |
 | input | bytes (string of chars 0-255, or binary) | bytes | bytes in that encoding |
@@ -430,18 +432,33 @@ on its own, in `[...]` or `[^...]`, or as a range end, must be at most
 | `.` | any byte except `\n` |
 | `λ`, `[λ]`, `[^λ]`, `[a-λ]`, `[^\x{100}]` | error: `{unencodable_char, CodePoint, latin1, Note}` |
 
-**POSIX, Perl and named classes** stand for their Latin-1 members. They
-use the Unicode definitions (sections 5 and 6), not the ASCII ones of
-`bytes` mode:
+**POSIX classes** are the ASCII ones, as in `bytes` mode: the 12
+classes of the POSIX standard, and `word`. They hold no Latin-1 letters,
+so `[[:alpha:]]` is `[A-Za-z]`. A negated POSIX class holds every other
+byte, so `[[:^alpha:]]` includes `é`. The definitions are those of
+[regular-expressions.info](https://www.regular-expressions.info/posixbrackets.html),
+and the tests check each one over all 256 bytes:
+
+| Class | Matches | Class | Matches |
+|---|---|---|---|
+| `[:alnum:]` | `[a-zA-Z0-9]` | `[:lower:]` | `[a-z]` |
+| `[:alpha:]` | `[a-zA-Z]` | `[:print:]` | `[\x20-\x7E]` |
+| `[:blank:]` | space, tab | `[:punct:]` | the 32 ASCII punctuation and symbol characters: `!` to `/`, `:` to `@`, `[` to `` ` ``, `{` to `~` |
+| `[:cntrl:]` | `[\x00-\x1F\x7F]` | `[:space:]` | space, `\t\r\n\v\f` |
+| `[:digit:]` | `[0-9]` | `[:upper:]` | `[A-Z]` |
+| `[:graph:]` | `[\x21-\x7E]` | `[:xdigit:]` | `[A-Fa-f0-9]` |
+| `[:word:]` | `[A-Za-z0-9_]` (not POSIX) | | |
+
+**Perl and named classes** (`\d \s \w`, `\p{...}`) use the Unicode
+definitions (section 6), cut down to their Latin-1 members:
 
 | Class | Latin-1 members |
 |---|---|
-| `[[:alpha:]]`, `\p{L}` | `A`-`Z`, `a`-`z`, `ª`, `µ`, `º`, `À`-`ÿ` except `×` and `÷` |
-| `[[:upper:]]`, `\p{Lu}` | `A`-`Z`, `À`-`Þ` except `×` |
-| `[[:^alpha:]]` | the other 139 bytes, including digits, `×` and `÷` |
-| `\d`, `[[:digit:]]` | `0`-`9` |
-| `\s`, `[[:space:]]` | tab, LF, VT, FF, CR, space, NEL (`\x85`), no-break space (`\xA0`) |
-| `[[:punct:]]` | ASCII punctuation and symbols, and `¡ § « ¶ · » ¿` |
+| `\p{L}` | `A`-`Z`, `a`-`z`, `ª`, `µ`, `º`, `À`-`ÿ` except `×` and `÷` |
+| `\p{Lu}` | `A`-`Z`, `À`-`Þ` except `×` |
+| `\d` | `0`-`9` |
+| `\s` | tab, LF, VT, FF, CR, space, NEL (`\x85`), no-break space (`\xA0`) |
+| `\w` | `\p{L}`, `0`-`9` and `_` |
 | `\p{Latin}` | the letters of `\p{L}` except `µ` (whose script is Common), and `·` (Script_Extensions) |
 | `\p{InBasicLatin}`, `\p{InLatin1}` | `\x00`-`\x7F`, `\x80`-`\xFF` |
 
@@ -479,7 +496,8 @@ other case is outside Latin-1 matches only itself:
 | `(?i)k` | `k`, `K` (not U+212A KELVIN SIGN) |
 | `(?i)ÿ` | `ÿ` only (`Ÿ` is U+0178) |
 | `(?i)ß`, `(?i)µ` | themselves only |
-| `(?i)[[:upper:]]` | the letters of `\p{L}` except `ª` and `º`, which have no case |
+| `(?i)[[:upper:]]` | `A`-`Z`, `a`-`z` (POSIX classes are ASCII) |
+| `(?i)\p{Lu}` | the letters of `\p{L}` except `ª` and `º`, which have no case |
 
 Folding comes before the check, so `(?i)\p{Greek}` is allowed: Greek
 `μ` folds to `µ` (U+00B5, MICRO SIGN), which is in Latin-1. It matches
