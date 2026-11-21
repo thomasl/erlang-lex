@@ -400,7 +400,10 @@ decodes the input and a negated class matches one whole character. In
 `utf8`, `utf16le/be` and `utf32le/be`, `[^é]` matches any character
 except `é`, as all of its bytes and never part of one (see
 [section 4](#4-character-classes)). In `latin1`, every character is one
-byte, so `[^é]` matches any byte except `E9`. To lex UTF-8 text with
+byte, so `[^é]` matches any byte except `E9`. (A character above 255
+cannot occur in `latin1` input. On its own, as `λ`, it is an error,
+`{unencodable_char, 955, latin1}`. In a class it is ignored without an
+error, so `[λ]` never matches and `[^λ]` matches any byte.) To lex UTF-8 text with
 negated classes of non-ASCII characters, use `{encoding, utf8}` rather
 than `bytes`.
 
