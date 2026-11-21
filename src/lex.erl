@@ -1428,6 +1428,11 @@ regexps_to_table(Regexp_rules0) ->
 %%     line and column (default process); see "Line and column counting"
 %%     below
 %%
+%%   {regexp_encoding, utf8 | unicode | latin1}  how the characters of the
+%%     regexps are read (default utf8: binaries, and strings of bytes that
+%%     are valid UTF-8, are UTF-8; other strings are code points); see
+%%     lex_spec_parse
+%%
 %%   {table, tuple | binary | {binary, 8 | 16 | 32}}  how the DFA table
 %%     is represented (default tuple); binary picks the smallest entry
 %%     width that holds the states; see "Binary tables" below
@@ -1452,7 +1457,8 @@ regexps_to_table(Regexp_rules0, Opts) ->
     NL = newline_option(Enc, proplists:get_value(newline, Opts, default)),
     PosMode = position_option(proplists:get_value(position, Opts, process)),
     TableRep = table_option(proplists:get_value(table, Opts, tuple)),
-    Regexp_rules = regexps_to_internal(Regexp_rules0, {Enc, Fold}),
+    RegexpEnc = regexp_encoding_option(proplists:get_value(regexp_encoding, Opts, utf8)),
+    Regexp_rules = regexps_to_internal(Regexp_rules0, {Enc, Fold}, RegexpEnc),
     NFA = regexps_to_nfa(Regexp_rules),
     DFA = minimize_dfa(nfa_to_dfa(NFA)),
     Lex_table = dfa_to_table(DFA, Regexp_rules, Enc, NL, PosMode),
@@ -1472,6 +1478,11 @@ newline_option(_Enc, NL) -> exit({unknown_newline, NL}).
 position_option(Mode) when Mode == process; Mode == argument; Mode == unboxed -> Mode;
 position_option(Mode) -> exit({unknown_position_mode, Mode}).
 
+%% How the characters of a regexp are read, see lex_spec_parse
+
+regexp_encoding_option(E) when E == utf8; E == unicode; E == latin1 -> E;
+regexp_encoding_option(E) -> exit({unknown_regexp_encoding, E}).
+
 table_option(tuple) -> tuple;
 table_option(binary) -> binary;
 table_option({binary, Bits} = Rep) when Bits == 8; Bits == 16; Bits == 32 -> Rep;
@@ -1483,18 +1494,22 @@ table_option(Other) -> exit({unknown_table_option, Other}).
 %% case-insensitive by default (option case_insensitive).
 
 regexps_to_internal(Regexp_rules0, Ctx) ->
-    [ regexp_to_internal(N, Rule, Ctx)
+    regexps_to_internal(Regexp_rules0, Ctx, utf8).
+
+regexps_to_internal(Regexp_rules0, Ctx, RegexpEnc) ->
+    [ regexp_to_internal(N, Rule, Ctx, RegexpEnc)
       || {N, Rule} <- lists:zip(lists:seq(1,length(Regexp_rules0)), Regexp_rules0) ].
 
 %% Convert a single regexp rule to internal form. A rule is
-%% {regexp, Regexp, Action} or {regexp, Prio, Regexp, Action}.
+%% {regexp, Regexp, Action} or {regexp, Prio, Regexp, Action}, where
+%% Regexp is a string, a binary or an iolist (see lex_spec_parse).
 
-regexp_to_internal(N, {regexp, Regexp_str, Action}, Ctx) ->
+regexp_to_internal(N, {regexp, Regexp_str, Action}, Ctx, RegexpEnc) ->
     Prio = 0,
-    {regexp, N, parse_regexp(Regexp_str, Ctx), Action, Prio};
-regexp_to_internal(N, {regexp, Prio, Regexp_str, Action}, Ctx)
+    {regexp, N, parse_regexp(Regexp_str, Ctx, RegexpEnc), Action, Prio};
+regexp_to_internal(N, {regexp, Prio, Regexp_str, Action}, Ctx, RegexpEnc)
   when is_integer(Prio), Prio >= 0 ->
-    {regexp, N, parse_regexp(Regexp_str, Ctx), Action, Prio}.
+    {regexp, N, parse_regexp(Regexp_str, Ctx, RegexpEnc), Action, Prio}.
     
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -1527,15 +1542,18 @@ regexp_to_internal(N, {regexp, Prio, Regexp_str, Action}, Ctx)
 parse_regexp(Regexp) ->
     parse_regexp(Regexp, {bytes, false}).
 
-parse_regexp(Regexp, {bytes, Fold}) ->
-    case lex_spec_parse:string(Regexp) of
+parse_regexp(Regexp, Ctx) ->
+    parse_regexp(Regexp, Ctx, utf8).
+
+parse_regexp(Regexp, {bytes, Fold}, RegexpEnc) ->
+    case lex_spec_parse:string(Regexp, bytes, RegexpEnc) of
   	{ok, RE} ->
   	    internal_form(RE, {bytes, Fold});
   	Err ->
   	    exit(Err)
     end;
-parse_regexp(Regexp, Ctx) ->
-    case lex_spec_parse:string(Regexp, unicode) of
+parse_regexp(Regexp, Ctx, RegexpEnc) ->
+    case lex_spec_parse:string(Regexp, unicode, RegexpEnc) of
   	{ok, RE} ->
   	    internal_form(RE, Ctx);
   	{error, Err} ->
@@ -3402,10 +3420,33 @@ newline() ->
 %% If you want to safely match a literal string, this function makes sure
 %% any reserved chars are escaped properly.
 
-safe_literal(LitChars) ->
-    lists:flatten(
-      [ quote_char(LitChar) || LitChar <- LitChars ]
-     ).
+%% The result has the form of the argument: a string for a string, a
+%% binary for a binary, an iolist for an iolist. The special characters
+%% are all ASCII, which never occurs inside a UTF-8 multi-byte sequence,
+%% so a UTF-8 binary can be escaped byte by byte.
+
+safe_literal(Bin) when is_binary(Bin) ->
+    << <<(quote_byte(B))/binary>> || <<B>> <= Bin >>;
+safe_literal(LitChars) when is_list(LitChars) ->
+    case is_flat_string(LitChars) of
+	true -> lists:flatten([ quote_char(LitChar) || LitChar <- LitChars ]);
+	false -> quote_iolist(LitChars)
+    end.
+
+is_flat_string([C | Cs]) when is_integer(C) -> is_flat_string(Cs);
+is_flat_string([]) -> true;
+is_flat_string(_) -> false.
+
+quote_iolist([H | T]) when is_integer(H) -> [quote_char(H) | quote_iolist(T)];
+quote_iolist([H | T]) -> [safe_literal(H) | quote_iolist(T)];
+quote_iolist([]) -> [];
+quote_iolist(Bin) when is_binary(Bin) -> safe_literal(Bin).  % improper tail
+
+quote_byte(B) ->
+    case quote_char(B) of
+	B -> <<B>>;
+	Escaped -> list_to_binary(Escaped)
+    end.
 
 quote_char($+) -> "\\+";
 quote_char($*) -> "\\*";

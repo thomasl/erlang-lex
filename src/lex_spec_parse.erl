@@ -18,16 +18,24 @@
 %% every element is a code point, and `\p{..}`, `\P{..}`, `\d` `\s` `\w`
 %% (and complements) are named classes.
 %%
+%% The regexp itself may be a string, a binary or an iolist of both
+%% (unicode:chardata()). How its characters are read is set by the regexp
+%% encoding (see "Input" below); by default binaries are UTF-8, and so is
+%% a string of bytes that is valid UTF-8, so "λ+", <<"λ+"/utf8>> and
+%% binary_to_list(<<"λ+"/utf8>>) are the same regexp.
+%%
 %% The result is a parse tree (regexp/0 below). Names of properties and
 %% POSIX classes are not checked here; lex_unicode resolves them.
 
 -module(lex_spec_parse).
 
--export([string/1, string/2, format_error/1]).
+-export([string/1, string/2, string/3, format_error/1]).
 
--export_type([regexp/0, class_item/0, mode/0, error_reason/0]).
+-export_type([regexp/0, class_item/0, mode/0, regexp_encoding/0, error_reason/0]).
 
 -type mode() :: bytes | unicode.
+
+-type regexp_encoding() :: utf8 | unicode | latin1.
 
 -type named_class() :: {prop, Negated :: boolean(), Name :: string()}
                      | {posix, Negated :: boolean(), Name :: string()}.
@@ -73,9 +81,16 @@ string(Regexp) ->
 
 -spec string(unicode:chardata(), mode()) ->
           {ok, regexp()} | {error, error_reason()}.
-string(Regexp, Mode) when Mode =:= bytes; Mode =:= unicode ->
+string(Regexp, Mode) ->
+    string(Regexp, Mode, utf8).
+
+-spec string(unicode:chardata(), mode(), regexp_encoding()) ->
+          {ok, regexp()} | {error, error_reason()}.
+string(Regexp, Mode, RegexpEnc)
+  when (Mode =:= bytes orelse Mode =:= unicode),
+       (RegexpEnc =:= utf8 orelse RegexpEnc =:= unicode orelse RegexpEnc =:= latin1) ->
     try
-        Chars = to_chars(Regexp, Mode),
+        Chars = to_chars(Regexp, Mode, RegexpEnc),
         {ok, parse(Chars, Mode)}
     catch
         throw:{?MODULE, Reason} -> {error, Reason}
@@ -93,22 +108,52 @@ format_error({illegal_flags, What}) ->
 format_error({misplaced_flags, Hint}) ->
     io_lib:format("misplaced flags: ~ts", [Hint]);
 format_error({bad_characters, What}) ->
-    io_lib:format("regexp is not valid character data: ~tp", [What]).
+    io_lib:format("regexp is not valid character data (a binary must be UTF-8, "
+                  "e.g. <<\"...\"/utf8>>): ~tp", [What]).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Input
 
-%% Bytes mode works on the UTF-8 bytes of the regexp, so "é" in a regexp
-%% matches the two bytes of an UTF-8 é in the input.
+%% The regexp encoding says how the regexp's characters are read:
+%%
+%%   utf8 (default)  binaries are UTF-8. A string (or iolist) whose
+%%                   elements are all bytes is read as UTF-8 if it is
+%%                   valid UTF-8, so a string of UTF-8 bytes works;
+%%                   otherwise its elements are code points, as in an
+%%                   Erlang string literal ("é" is [233], which is not
+%%                   valid UTF-8 on its own, so it stays U+00E9). ASCII
+%%                   reads the same either way.
+%%   unicode         unicode:chardata(): list elements are code points,
+%%                   binaries UTF-8 (no guessing).
+%%   latin1          every element and every byte of a binary is one
+%%                   character 0..255. In bytes mode these are the bytes
+%%                   to match, not converted to UTF-8.
+%%
+%% Bytes mode then works on the UTF-8 bytes of the characters (except
+%% with latin1), so "é" in a regexp matches the two bytes of an UTF-8 é
+%% in the input.
 
-to_chars(Regexp, Mode) ->
-    Target = case Mode of
-                 bytes -> utf8;
-                 unicode -> unicode
-             end,
-    case unicode:characters_to_binary(Regexp, unicode, Target) of
-        Bin when is_binary(Bin), Mode =:= bytes -> binary_to_list(Bin);
-        Bin when is_binary(Bin) -> unicode:characters_to_list(Bin);
+to_chars(Regexp, Mode, RegexpEnc) ->
+    CodePoints = code_points(Regexp, RegexpEnc),
+    case {Mode, RegexpEnc} of
+        {unicode, _} -> CodePoints;
+        {bytes, latin1} -> CodePoints;
+        {bytes, _} -> binary_to_list(unicode:characters_to_binary(CodePoints))
+    end.
+
+code_points(Regexp, utf8) ->
+    try iolist_to_binary(Regexp) of
+        Bytes ->
+            case unicode:characters_to_list(Bytes, utf8) of
+                List when is_list(List) -> List;
+                _ -> code_points(Regexp, unicode)    % not UTF-8: code points
+            end
+    catch
+        error:badarg -> code_points(Regexp, unicode) % has code points > 255
+    end;
+code_points(Regexp, Enc) ->
+    case unicode:characters_to_list(Regexp, Enc) of
+        List when is_list(List) -> List;
         _ -> ?FAIL({bad_characters, Regexp})
     end.
 

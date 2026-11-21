@@ -86,3 +86,41 @@ format_error_test() ->
     Reasons = [element(2, R) || R <- [?B("a)"), ?B("(a"), ?B("[a-a]"), ?B("a(?i)b"),
                                       ?B("(?x)"), ?U([16#110000])]],
     [?assert(is_list(lists:flatten(lex_spec_parse:format_error(R)))) || R <- Reasons].
+
+%% Regexps as strings, binaries and iolists (regexp encoding utf8, the
+%% default): all of these are the same regexp.
+regexp_forms_test_() ->
+    Forms = ["λ+", <<"λ+"/utf8>>, [<<"λ"/utf8>>, "+"], ["λ", <<"+">>],
+             binary_to_list(<<"λ+"/utf8>>), [binary_to_list(<<"λ"/utf8>>), $+],
+             [$λ | <<"+">>]],
+    [?_assertEqual({ok, {pclosure, 16#3BB}}, lex_spec_parse:string(F, unicode)) || F <- Forms]
+    %% in bytes mode λ is two bytes, and + applies to the last one
+    ++ [?_assertEqual({ok, {concat, 16#CE, {pclosure, 16#BB}}}, lex_spec_parse:string(F, bytes)) || F <- Forms].
+
+%% A string literal "é" is [233]: not valid UTF-8 on its own, so it stays
+%% a code point; its UTF-8 bytes [16#C3, 16#A9] give the same character
+utf8_strings_test_() ->
+    [?_assertEqual({ok, 233}, lex_spec_parse:string("é", unicode)),
+     ?_assertEqual({ok, 233}, lex_spec_parse:string([16#C3, 16#A9], unicode)),
+     ?_assertEqual({ok, 233}, lex_spec_parse:string(<<"é"/utf8>>, unicode)),
+     ?_assertEqual({ok, {concat, 16#C3, 16#A9}}, lex_spec_parse:string("é", bytes)),
+     ?_assertEqual({ok, {concat, 16#C3, 16#A9}}, lex_spec_parse:string([16#C3, 16#A9], bytes)),
+     %% mixed: not valid UTF-8 as a whole, so the list part is code points
+     ?_assertEqual({ok, {concat, 233, 233}}, lex_spec_parse:string([<<"é"/utf8>>, [233]], unicode)),
+     %% escapes are ASCII and not affected
+     ?_assertEqual({ok, 16#3BB}, lex_spec_parse:string(<<"\\x{3bb}">>, unicode))].
+
+regexp_encoding_test_() ->
+    S = fun(R, Mode, Enc) -> lex_spec_parse:string(R, Mode, Enc) end,
+    [%% unicode: Erlang chardata, no guessing
+     ?_assertEqual({ok, {concat, 16#C3, 16#A9}}, S([16#C3, 16#A9], unicode, unicode)),
+     ?_assertEqual({ok, 233}, S(<<"é"/utf8>>, unicode, unicode)),
+     %% latin1: one character per element or byte; bytes mode keeps them as bytes
+     ?_assertEqual({ok, 233}, S(<<233>>, unicode, latin1)),
+     ?_assertEqual({ok, 233}, S("é", bytes, latin1)),
+     ?_assertEqual({ok, {concat, 16#C3, 16#A9}}, S(<<"é"/utf8>>, unicode, latin1)),
+     %% a binary that is not UTF-8 (<<"λ">> without /utf8 is <<187>>)
+     ?_assertMatch({error, {bad_characters, _}}, S(<<187>>, unicode, utf8)),
+     ?_assertMatch({error, {bad_characters, _}}, S(<<187>>, bytes, unicode)),
+     ?_assertMatch({error, {bad_characters, _}}, S([16#3BB], unicode, latin1)),
+     ?_assertError(function_clause, S("a", unicode, utf16))].

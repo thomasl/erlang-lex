@@ -159,6 +159,11 @@ Compile the rules. `Options` is a list of:
 - `{position, process | argument | unboxed}`: whether the drivers keep
   the line and column in the process dictionary (default) or pass them
   as arguments, see [Position as an argument](#position-as-an-argument)
+- `{regexp_encoding, utf8 | unicode | latin1}`: how the characters of
+  the regexps are read; default `utf8`. A regexp can be a string, a
+  binary or an iolist. Binaries are UTF-8, and so is a string of bytes
+  that is valid UTF-8; other strings are code points. See
+  [syntax.md](syntax.md#how-regexp-characters-are-read)
 - `{table, tuple | binary | {binary, 8 | 16 | 32}}`: how the DFA table
   is stored; default `tuple`. `binary` uses the smallest entry width
   that holds the number of states. The binary is smaller and free to
@@ -582,7 +587,7 @@ pays off only together with the unboxed loop.
 
 | Function | |
 |---|---|
-| `safe_literal(String)` | escape the regexp special characters in `String`, so `lex:safe_literal("a+b")` matches the text `a+b` |
+| `safe_literal(Literal)` | escape the regexp special characters in `Literal` (a string, binary or iolist, returned in the same form), so `lex:safe_literal("a+b")` matches the text `a+b` |
 | `strip_c_comments(String)` | remove (nestable) `/* ... */` comments; a pre-pass for input that is hard to describe with regexps |
 | `resolve_line(String)` | replace `?LINE` with the line number |
 | `transition(State, Byte, Table)` | the next state of the DFA, or -1; `Table` is the `table` field of the `#lex{}` from `regexps_to_table/2`, in either [representation](#table-representation) |
@@ -642,6 +647,8 @@ Raised (as `exit`) by `regexps_to_table/1,2` and `with/2,3`:
 | `{unknown_newline, NL}` | bad `{newline, NL}` |
 | `{unicode_newline_needs_encoding, bytes}` | `{newline, unicode}` with the `bytes` encoding |
 | `{unknown_table_option, Rep}` | bad `{table, Rep}` |
+| `{unknown_regexp_encoding, E}` | bad `{regexp_encoding, E}` |
+| `{regexp_error, {bad_characters, Regexp}, Regexp}` | a regexp that is not valid character data, e.g. a binary that is not UTF-8 (bytes mode: `{error, {bad_characters, Regexp}}`) |
 | `{table_too_large, States, {binary, Bits}}` | `{table, {binary, Bits}}` with too many states for `Bits`-bit entries |
 
 Syntax errors (`Error` above) include `{illegal, Chars}`,

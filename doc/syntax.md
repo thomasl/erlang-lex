@@ -16,9 +16,10 @@ Contents:
 8. [Bytes mode versus the Unicode encodings](#8-bytes-mode-versus-the-unicode-encodings)
 9. [Not supported](#9-not-supported)
 
-Regexps are given as Erlang strings, so every backslash in this document
-is written twice in Erlang source: the regexp `\p{L}+` is the Erlang
-string `"\\p{L}+"`, and `\.` is `"\\."`.
+Regexps are usually given as Erlang strings, so every backslash in this
+document is written twice in Erlang source: the regexp `\p{L}+` is the
+Erlang string `"\\p{L}+"`, and `\.` is `"\\."`. They can also be
+binaries or iolists, see [Rules](#1-rules).
 
 ## 1. Rules
 
@@ -29,8 +30,8 @@ A specification is a list of rules:
 {regexp, Priority, Regexp, Action}
 ```
 
-- `Regexp` is a string (or, in the Unicode encodings, also a UTF-8
-  binary) in the syntax below.
+- `Regexp` is a string, a binary or an iolist of both, in the syntax
+  below. See [How regexp characters are read](#how-regexp-characters-are-read).
 - `Priority` is an integer `>= 0`; the default is 0.
 - `Action` is a fun of one argument, or any other term (see below).
 
@@ -55,6 +56,50 @@ dropped, which is handy while developing a specification.
 
 `lex` provides ready-made actions, see
 [README.md, "Token helpers"](README.md#token-helpers).
+
+### How regexp characters are read
+
+With the default option `{regexp_encoding, utf8}`, these are all the
+same regexp:
+
+```erlang
+"λ+"                                 % an Erlang string literal: [955, $+]
+<<"λ+"/utf8>>                        % a UTF-8 binary
+["λ", <<"+">>]                       % an iolist
+binary_to_list(<<"λ+"/utf8>>)        % a string of UTF-8 bytes: [206, 187, $+]
+```
+
+- A binary is UTF-8. Write `<<"λ"/utf8>>`: plain `<<"λ">>` keeps only the
+  low byte of each character, which is not valid UTF-8 and gives the
+  error `{bad_characters, Regexp}`.
+- A string (or iolist) whose elements are all bytes is read as UTF-8 if
+  it is valid UTF-8. That covers a regexp read from a file or a socket
+  as a list, or source code compiled as Latin-1.
+- Otherwise the elements of a string are code points, as in an Erlang
+  string literal in a UTF-8 source file. `"é"` is `[233]`, which is not
+  valid UTF-8 on its own, so it stays U+00E9. So does `[<<"é"/utf8>>,
+  "é"]`, which is not valid UTF-8 as a whole: its binary is still UTF-8
+  and its list part code points.
+- ASCII reads the same either way, and so do escapes such as `\x{3BB}`.
+
+The guess has one ambiguous case: a string of code points 128-255 that
+happens to be valid UTF-8, such as `"Ã©"` (`[195, 169]`), reads as `é`.
+Two other settings avoid guessing:
+
+| `{regexp_encoding, E}` | Strings | Binaries |
+|---|---|---|
+| `utf8` (default) | UTF-8 if all bytes and valid UTF-8, otherwise code points | UTF-8 |
+| `unicode` | code points (Erlang `unicode:chardata()`) | UTF-8 |
+| `latin1` | one character 0-255 per element | one character per byte |
+
+In `bytes` mode the characters are then matched as their UTF-8 bytes
+(see [section 8](#8-bytes-mode-versus-the-unicode-encodings)), except
+with `latin1`, where each character is the byte to match. So
+`{regexp_encoding, latin1}` is the way to write raw bytes in `bytes`
+mode without `\xHH` escapes.
+
+`lex:safe_literal/1` returns its result in the form of its argument (a
+string, binary or iolist), so it works with all of these.
 
 ## 2. Regular expressions
 

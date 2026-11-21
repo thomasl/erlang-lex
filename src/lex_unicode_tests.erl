@@ -1114,6 +1114,54 @@ socket_loop(Sock, C, Acc) ->
 %% Every driver, in argument mode, with 1- and 2-argument actions, gives
 %% the same tokens, positions and errors as process mode
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Regexps as strings, binaries and iolists
+
+%% Every form of the same regexps gives the same tokens, in each encoding
+regexp_forms_lex_test_() ->
+    Forms = [{string, fun(S) -> S end},
+             {utf8_binary, fun(S) -> unicode:characters_to_binary(S) end},
+             {utf8_byte_list, fun(S) -> binary_to_list(unicode:characters_to_binary(S)) end},
+             {iolist, fun([C | Cs]) -> [unicode:characters_to_binary([C]), [Cs]] end}],
+    Rules = fun(F) -> [{regexp, F("λ+"), lex:item(l)}, {regexp, F("é|ü"), lex:item(e)},
+                       {regexp, F(" "), lex:whitespace()}] end,
+    [ {lists:flatten(io_lib:format("~w ~w", [Enc, Form])),
+       ?_assertEqual(lex:with(Rules(fun(S) -> S end), Input, [{encoding, Enc}]),
+                     lex:with(Rules(F), Input, [{encoding, Enc}]))}
+      || Enc <- [bytes, utf8, {utf16, little}, {utf32, big}],
+         Input <- [unicode:characters_to_binary("λλ é ü λ", unicode,
+                                                case Enc of bytes -> utf8; _ -> Enc end)],
+         {Form, F} <- Forms ].
+
+regexp_encoding_option_test_() ->
+    W = fun(Rules, Input, Opts) -> caught(fun() -> lex:with(Rules, Input, Opts) end) end,
+    [%% latin1: the byte 233 in a binary regexp is é
+     ?_assertEqual([{e, 1, "é"}], W([{regexp, <<233>>, lex:item(e)}], <<233>>,
+                                    [{encoding, latin1}, {regexp_encoding, latin1}])),
+     %% and in bytes mode it is the byte 233, not the UTF-8 bytes of é
+     ?_assertEqual([{e, 1, [233]}], W([{regexp, "é", lex:item(e)}], <<233>>,
+                                      [{regexp_encoding, latin1}])),
+     ?_assertMatch({'EXIT', {lex_no_match, _, _}}, W([{regexp, "é", lex:item(e)}], <<233>>, [])),
+     %% unicode: a list of UTF-8 bytes is two characters
+     ?_assertEqual([{e, 1, [16#C3, 16#A9]}],
+                   W([{regexp, [16#C3, 16#A9], lex:item(e)}], <<"Ã©"/utf8>>,
+                     [{encoding, utf8}, {regexp_encoding, unicode}])),
+     ?_assertMatch({'EXIT', {regexp_error, {bad_characters, _}, _}},
+                   W([{regexp, <<187>>, lex:item(e)}], <<>>, [{encoding, utf8}])),
+     ?_assertMatch({'EXIT', {unknown_regexp_encoding, utf16}},
+                   W([{regexp, "a", lex:item(e)}], <<"a">>, [{regexp_encoding, utf16}]))].
+
+safe_literal_forms_test_() ->
+    Text = "a+(λ)?",
+    Lex = fun(Re) -> lex:with([{regexp, Re, lex:item(t)}], unicode:characters_to_binary(Text),
+                              [{encoding, utf8}]) end,
+    Expected = [{t, 1, Text}],
+    [?_assertEqual(Expected, Lex(lex:safe_literal(Text))),
+     ?_assertEqual(Expected, Lex(lex:safe_literal(unicode:characters_to_binary(Text)))),
+     ?_assertEqual(Expected, Lex(lex:safe_literal(["a+", [<<"(λ"/utf8>>], $) | <<"?">>]))),
+     ?_assertEqual(<<"a\\+\\(λ\\)\\?"/utf8>>, lex:safe_literal(unicode:characters_to_binary(Text))),
+     ?_assertEqual("a\\+\\(λ\\)\\?", lex:safe_literal(Text))].
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Binary tables ({table, binary})
 
 table_tag(Re, Opts) ->
