@@ -380,29 +380,8 @@ A character that the encoding cannot represent is an error:
 Unicode encodings.
 
 **`latin1` regexps use latin1 only.** In `{encoding, latin1}`, every
-character in a regexp must be in Latin-1 (0-255): on its own, in a
-class (negated or not), or as a range end. Any other character, such
-as `λ`, `[λ]`, `[^λ]` or `[a-λ]`, is an error,
-`{unencodable_char, CodePoint, latin1, Note}`, where `Note` says to use
-`{encoding, utf8}` (or `utf16`, `utf32`) instead.
-
-Named classes follow the same idea:
-
-- A class that is well defined for latin1 stands for its latin1
-  members. That includes the POSIX classes, `\d` `\s` `\w`, general
-  categories such as `\p{L}` or `\p{Lu}`, and scripts and blocks with
-  latin1 characters, such as `\p{Latin}` or `\p{InLatin1}`. For
-  example, `[[:alpha:]]` matches `A`-`Z`, `a`-`z`, `ª`, `µ`, `º`,
-  `À`-`ÿ` except `×` and `÷`.
-- A class with no characters of its own in latin1 is an error,
-  `{unencodable_class, Class, latin1, Note}`, for example `\p{Greek}`,
-  `\p{Han}`, `\p{Cyrillic}` or `\p{InCyrillic}`, also inside brackets.
-  A script is judged by its own characters (`sc`). The extensions that
-  bare script names include (`scx`, [section 6](#6-named-unicode-classes-p))
-  are characters shared with other scripts, such as U+00B7 MIDDLE DOT
-  for Greek and Han, and do not count.
-- The check applies to the class as written, with `\P` or `[:^...:]`, so
-  `\P{Greek}` is allowed: it has latin1 members.
+character in a regexp must be in Latin-1 (0-255), and every class must
+have characters in Latin-1. See [Classes in latin1](#classes-in-latin1).
 
 **Non-ASCII characters in `bytes` mode.** The lexer reads bytes, so a
 non-ASCII character in a regexp stands for its UTF-8 bytes. They form
@@ -429,6 +408,76 @@ except `é`, as all of its bytes and never part of one (see
 byte, so `[^é]` matches any byte except `E9`. To lex UTF-8 text with
 negated classes of non-ASCII characters, use `{encoding, utf8}` rather
 than `bytes`.
+
+### Classes in latin1
+
+With `{encoding, latin1}` the lexer reads one byte per character, and a
+regexp may only use the 256 Latin-1 characters (U+0000-U+00FF). Classes
+work as in the Unicode encodings, cut down to those characters, with
+two kinds of error for what latin1 cannot express. Each error carries
+a `Note` saying to use `{encoding, utf8}` (or `utf16`, `utf32`) instead.
+
+**Characters and bracket classes.** A character written in a regexp,
+on its own, in `[...]` or `[^...]`, or as a range end, must be at most
+255. Escapes work the same way: `\xHH`, `\NNN` and `\x{...}` up to
+`\x{FF}`.
+
+| Regexp | Matches |
+|---|---|
+| `[a-zé]` | `a`-`z` or `é` |
+| `[^é]` | any byte except `E9` |
+| `[\xC0-\xFF]` | `À`-`ÿ` |
+| `.` | any byte except `\n` |
+| `λ`, `[λ]`, `[^λ]`, `[a-λ]`, `[^\x{100}]` | error: `{unencodable_char, CodePoint, latin1, Note}` |
+
+**POSIX, Perl and named classes** stand for their Latin-1 members. They
+use the Unicode definitions (sections 5 and 6), not the ASCII ones of
+`bytes` mode:
+
+| Class | Latin-1 members |
+|---|---|
+| `[[:alpha:]]`, `\p{L}` | `A`-`Z`, `a`-`z`, `ª`, `µ`, `º`, `À`-`ÿ` except `×` and `÷` |
+| `[[:upper:]]`, `\p{Lu}` | `A`-`Z`, `À`-`Þ` except `×` |
+| `[[:^alpha:]]` | the other 139 bytes, including digits, `×` and `÷` |
+| `\d`, `[[:digit:]]` | `0`-`9` |
+| `\s`, `[[:space:]]` | tab, LF, VT, FF, CR, space, NEL (`\x85`), no-break space (`\xA0`) |
+| `[[:punct:]]` | ASCII punctuation and symbols, and `¡ § « ¶ · » ¿` |
+| `\p{Latin}` | the letters of `\p{L}` except `µ` (whose script is Common), and `·` (Script_Extensions) |
+| `\p{InBasicLatin}`, `\p{InLatin1}` | `\x00`-`\x7F`, `\x80`-`\xFF` |
+
+A named class with **no characters of its own** in Latin-1 is an
+error: `{unencodable_class, Class, latin1, Note}`. Examples are
+`\p{Greek}`, `\p{Han}`, `\p{Cyrillic}` and `\p{InCyrillic}`, and they
+are rejected inside brackets too. A script is judged by its own
+characters (`sc`, the Script property). A bare script name means
+Script_Extensions ([section 6](#6-named-unicode-classes-p)), which adds
+characters shared with other scripts, such as `·` (U+00B7) for Greek and
+Han. Those shared characters do not count, so `\p{Greek}` is an error
+rather than a class of `·` alone.
+
+The check is made on each class element **as written**, including its
+`\P` or `^`:
+
+- `\P{Greek}` and `\p{^Greek}` are allowed. They have Latin-1 members:
+  everything except `·`.
+- `[^\p{Greek}]` is an error, because the element `\p{Greek}` has none.
+  Write `\P{Greek}` instead.
+
+**Case-insensitive matching** uses Unicode case folding, cut down to
+Latin-1 ([section 7](#7-case-insensitive-matching)). A character whose
+other case is outside Latin-1 matches only itself:
+
+| Regexp | Matches |
+|---|---|
+| `(?i)é` | `é`, `É` |
+| `(?i)k` | `k`, `K` (not U+212A KELVIN SIGN) |
+| `(?i)ÿ` | `ÿ` only (`Ÿ` is U+0178) |
+| `(?i)ß`, `(?i)µ` | themselves only |
+| `(?i)[[:upper:]]` | the letters of `\p{L}` except `ª` and `º`, which have no case |
+
+Folding comes before the check, so `(?i)\p{Greek}` is allowed: Greek
+`μ` folds to `µ` (U+00B5, MICRO SIGN), which is in Latin-1. It matches
+`µ` and `·`.
 
 ## 9. Not supported
 

@@ -100,7 +100,7 @@ The option `{encoding, Enc}` decides how regexps and input are read:
 | `Enc` | Regexps | Input | Tokens (action argument) |
 |---|---|---|---|
 | `bytes` (default) | bytes; a non-ASCII character in a regexp is its UTF-8 bytes, as a unit | list of 0-255 or binary | bytes |
-| `latin1` | code points 0-255 only (others are an error; use a Unicode encoding) | Latin-1 bytes | code points |
+| `latin1` | code points 0-255 only (others are an error; use a Unicode encoding); classes are cut down to Latin-1, see [syntax.md](syntax.md#classes-in-latin1) | Latin-1 bytes | code points |
 | `utf8` | code points | UTF-8 ([RFC 3629]) | code points |
 | `utf16be`, `utf16le` | code points | UTF-16 ([RFC 2781]), big or little endian | code points |
 | `utf32be`, `utf32le` | code points | UTF-32, big or little endian | code points |
