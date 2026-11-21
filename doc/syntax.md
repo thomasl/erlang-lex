@@ -393,9 +393,16 @@ two bytes. It could mean "any byte but the first byte of `é`" or "any
 byte but its bytes", but neither is what the regexp says. So a non-ASCII
 character in a negated class is an error,
 `{non_ascii_in_negated_class, Chars}`. ASCII members and byte escapes
-are allowed (`[^a\xE9]`). For "any character but `é`", use
-`{encoding, utf8}`, where `[^é]` matches whole characters. This choice
-may be revisited.
+are allowed (`[^a\xE9]`). This choice may be revisited.
+
+The other encodings do not have this problem, because the lexer
+decodes the input and a negated class matches one whole character. In
+`utf8`, `utf16le/be` and `utf32le/be`, `[^é]` matches any character
+except `é`, as all of its bytes and never part of one (see
+[section 4](#4-character-classes)). In `latin1`, every character is one
+byte, so `[^é]` matches any byte except `E9`. To lex UTF-8 text with
+negated classes of non-ASCII characters, use `{encoding, utf8}` rather
+than `bytes`.
 
 ## 9. Not supported
 

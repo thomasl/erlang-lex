@@ -1353,6 +1353,9 @@ Syntax and semantics of the classes:
   error (`{non_ascii_in_negated_class, Chars}`), since a negated class
   matches a single byte. Whether to give it a meaning instead is open;
   see [syntax.md](syntax.md#8-bytes-mode-versus-the-unicode-encodings).
+  The other encodings handle it: with `{encoding, utf8}` (or UTF-16,
+  UTF-32), `[^é]` matches any whole character except `é`, and in
+  `latin1` any byte except `E9`.
 - **Backtracking** can make lexing quadratic for pathological rule sets,
   see [Lexing corner cases](#lexing-corner-cases).
 
