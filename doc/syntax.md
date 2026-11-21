@@ -455,13 +455,19 @@ characters shared with other scripts, such as `·` (U+00B7) for Greek and
 Han. Those shared characters do not count, so `\p{Greek}` is an error
 rather than a class of `·` alone.
 
-The check is made on each class element **as written**, including its
-`\P` or `^`:
+How the check is made depends on the class:
 
-- `\P{Greek}` and `\p{^Greek}` are allowed. They have Latin-1 members:
-  everything except `·`.
-- `[^\p{Greek}]` is an error, because the element `\p{Greek}` has none.
-  Write `\P{Greek}` instead.
+- **On its own, and in a positive bracket class**, each named class must
+  have Latin-1 characters of its own, so `[a\p{Greek}]` is an error even
+  though `a` is fine. `\P{Greek}` and `\p{^Greek}` are allowed: they
+  have Latin-1 members, everything except `·`.
+- **In a negated bracket class** the elements say what to exclude, so
+  the class is checked as a whole, after the `^`. `[^\p{Greek}]` is
+  allowed and means the same as `\P{Greek}`. `[^\P{Greek}]` would match
+  only Greek characters, so it is an error, like `\p{Greek}`.
+- A class with no characters in any encoding, such as
+  `[^[:alpha:][:^alpha:]]`, is not a latin1 error. Like any empty class,
+  it never matches.
 
 **Case-insensitive matching** uses Unicode case folding, cut down to
 Latin-1 ([section 7](#7-case-insensitive-matching)). A character whose

@@ -1607,11 +1607,14 @@ internal_form({char_class, Elems}, {bytes, _} = Ctx) ->
     flatten_disj(Parts);
 internal_form({char_class, Elems}, {Enc, _} = Ctx) ->
     check_class_chars(Elems, Enc),
+    check_latin1_classes(Elems, false, Ctx),
     lower_set(Enc, class_set(Elems, Ctx));
 internal_form({comp_class, Elems}, {Enc, _} = Ctx) ->
     check_class_chars(Elems, Enc),
+    check_latin1_classes(Elems, true, Ctx),
     lower_set(Enc, lex_unicode:complement(class_set(Elems, Ctx)));
 internal_form({prop, _Neg, _Name} = Prop, {Enc, _} = Ctx) ->
+    check_latin1_classes([Prop], false, Ctx),
     lower_set(Enc, class_set([Prop], Ctx));
 internal_form(C, {Enc, _} = Ctx) when is_integer(C) ->
     case Enc =/= bytes andalso lex_unicode:byte_seqs(Enc, [{C, C}]) == [] of
@@ -1664,44 +1667,76 @@ elem_set(C, Ctx) when is_integer(C) ->
     fold_set([{C, C}], Ctx);
 elem_set({From, To}, Ctx) when is_integer(From), is_integer(To) ->
     fold_set([{From, To}], Ctx);
-elem_set({prop, Neg, Name} = Class, Ctx) ->
-    Set = negate(Neg, fold_set(named_set(lex_unicode:property(Name)), Ctx)),
-    %% a script class is judged by the script's own characters, without
-    %% the extensions it shares with other scripts (U+00B7 for Greek)
-    Own = case lex_unicode:script_set(Name) of
-	      {ok, Script} -> negate(Neg, fold_set(Script, Ctx));
-	      none -> Set
-	  end,
-    latin1_subset(Class, Ctx, Own),
-    Set;
-elem_set({posix, Neg, Name} = Class, {Enc, _} = Ctx) ->
+elem_set({prop, Neg, Name}, Ctx) ->
+    negate(Neg, fold_set(named_set(lex_unicode:property(Name)), Ctx));
+elem_set({posix, Neg, Name}, {Enc, _} = Ctx) ->
     Charset = case lex_unicode:is_unicode(Enc) of
 		  true -> unicode;
 		  false -> ascii
 	      end,
-    Set = negate(Neg, fold_set(named_set(lex_unicode:posix_class(Name, Charset)), Ctx)),
-    latin1_subset(Class, Ctx, Set),
-    Set.
+    negate(Neg, fold_set(named_set(lex_unicode:posix_class(Name, Charset)), Ctx)).
 
 %% In latin1, a named or POSIX class stands for its latin1 members
-%% (lower_set/2 drops the rest). A class with none of its own, such as
-%% \p{Greek} or \p{InCyrillic}, maps to characters latin1 cannot
+%% (lower_set/2 drops the rest), but a class with none of its own, such
+%% as \p{Greek} or \p{InCyrillic}, maps to characters latin1 cannot
 %% represent: an error.
+%%
+%% - In a positive class (and on its own) each named class must have
+%%   latin1 characters, so [a\p{Greek}] is an error.
+%% - The elements of a negated class say what to exclude, so the class
+%%   is checked as a whole, after the ^: [^\p{Greek}] is allowed, like
+%%   \P{Greek}, and [^\P{Greek}] is an error, like \p{Greek}.
 
-latin1_subset(Class, {latin1, _}, Set) ->
-    case lex_unicode:intersect(Set, [{0, 255}]) of
-	[] -> exit({unencodable_class, class_text(Class), latin1,
-		    "this class has no characters in latin1 (0-255); "
-		    "use {encoding, utf8} (or utf16, utf32)"});
-	_ -> ok
+check_latin1_classes(Elems, false, {latin1, _} = Ctx) ->
+    [ unencodable_class(class_text(E))
+      || E <- Elems, is_named_class(E), only_above_latin1(own_set(E, Ctx)) ],
+    ok;
+check_latin1_classes(Elems, true, {latin1, _} = Ctx) ->
+    case lists:any(fun is_named_class/1, Elems) of
+	false -> ok;
+	true ->
+	    Own = lex_unicode:normalize(lists:append([ own_set(E, Ctx) || E <- Elems ])),
+	    case only_above_latin1(lex_unicode:complement(Own)) of
+		true -> unencodable_class("[^" ++ lists:append([ class_text(E) || E <- Elems ]) ++ "]");
+		false -> ok
+	    end
     end;
-latin1_subset(_Class, _Ctx, _Set) ->
+check_latin1_classes(_Elems, _Negated, _Ctx) ->
     ok.
+
+%% A set with characters, but none in latin1. (An empty set is not a
+%% latin1 problem: it never matches in any encoding.)
+only_above_latin1(Set) ->
+    Set =/= [] andalso lex_unicode:intersect(Set, [{0, 255}]) == [].
+
+is_named_class({prop, _, _}) -> true;
+is_named_class({posix, _, _}) -> true;
+is_named_class(_) -> false.
+
+%% The set of a class element, where a script is only its own
+%% characters, without the extensions it shares with other scripts
+%% (U+00B7 for Greek and Han)
+own_set({prop, Neg, Name} = E, Ctx) ->
+    case lex_unicode:script_set(Name) of
+	{ok, Script} -> negate(Neg, fold_set(Script, Ctx));
+	none -> elem_set(E, Ctx)
+    end;
+own_set(E, Ctx) ->
+    elem_set(E, Ctx).
+
+unencodable_class(Text) ->
+    exit({unencodable_class, Text, latin1,
+	  "this class has no characters in latin1 (0-255); "
+	  "use {encoding, utf8} (or utf16, utf32)"}).
 
 class_text({prop, Neg, Name}) ->
     [$\\, case Neg of true -> $P; false -> $p end, ${ | Name] ++ "}";
 class_text({posix, Neg, Name}) ->
-    "[:" ++ [$^ || Neg] ++ Name ++ ":]".
+    "[:" ++ [$^ || Neg] ++ Name ++ ":]";
+class_text({From, To}) ->
+    [From, $-, To];
+class_text(C) when is_integer(C) ->
+    [C].
 
 named_set({ok, Set}) -> Set;
 named_set({error, Reason}) -> exit(Reason).

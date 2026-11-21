@@ -1213,7 +1213,19 @@ latin1_named_classes_test_() ->
         ?_assertEqual([], In("\\w", "a1_é")),
         ?_assertEqual([], In("\\P{Greek}", "aé1 ")),
         ?_assertEqual([], In("\\p{Lu}", "AÀÞ")),
-        ?_assertEqual([], Out("\\p{Lu}", "aßÿ"))].
+        ?_assertEqual([], Out("\\p{Lu}", "aßÿ")),
+        %% a negated class is checked as a whole, after the ^
+        ?_assertEqual(latin1_members("\\P{Greek}"), latin1_members("[^\\p{Greek}]")),
+        ?_assertEqual(latin1_members("\\P{Greek}"), latin1_members("\\p{^Greek}")),
+        ?_assertEqual(lists:seq(0, 255) -- "a·", latin1_members("[^a\\p{Greek}]")),
+        ?_assertMatch({'EXIT', {unencodable_class, "[^\\P{Greek}]", latin1, _}}, E("[^\\P{Greek}]")),
+        ?_assertMatch({'EXIT', {unencodable_class, "[^\\P{Han}a]", latin1, _}}, E("[^\\P{Han}a]")),
+        %% a class that is empty everywhere is not a latin1 problem
+        ?_assertEqual([], latin1_members("[^[:^alpha:][:alpha:]]"))].
+
+latin1_members(Re) ->
+    T = table(Re, latin1),
+    [C || C <- lists:seq(0, 255), accepts(T, [C])].
 
 safe_literal_forms_test_() ->
     Text = "a+(λ)?",
