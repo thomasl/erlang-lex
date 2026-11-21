@@ -364,8 +364,8 @@ The encoding is chosen with `{encoding, Enc}` (default `bytes`); see
 
 | | `bytes` (default) | `latin1` | `utf8`, `utf16le/be`, `utf32le/be` |
 |---|---|---|---|
-| regexp characters | ASCII characters and escapes are bytes; a non-ASCII character is its UTF-8 bytes, as a unit | code points 0-255 | code points 0-10FFFF |
-| `\x{...}` | up to `FF` | up to `10FFFF` (above `FF` is an error) | up to `10FFFF`, no surrogates |
+| regexp characters | ASCII characters and escapes are bytes; a non-ASCII character is its UTF-8 bytes, as a unit | latin1 only (0-255); others are an error | code points 0-10FFFF |
+| `\x{...}` | up to `FF` | up to `FF` | up to `10FFFF`, no surrogates |
 | `\d \s \w` | DEL, space, `w` | Unicode classes | Unicode classes |
 | `\p{...}` | not available | yes (restricted to 0-255) | yes |
 | POSIX classes | ASCII | Unicode, restricted to 0-255 | Unicode |
@@ -375,8 +375,18 @@ The encoding is chosen with `{encoding, Enc}` (default `bytes`); see
 | action argument | reversed bytes | reversed code points (= bytes) | reversed code points |
 | malformed input | not checked | not applicable | rejected, see [README.md](README.md#errors) |
 
-A literal that the encoding cannot represent is an error:
-`{unencodable_char, CodePoint, Enc}`.
+A character that the encoding cannot represent is an error:
+`{unencodable_char, CodePoint, Enc}`, for example a surrogate in the
+Unicode encodings.
+
+**`latin1` regexps use latin1 only.** In `{encoding, latin1}`, every
+character in a regexp must be in Latin-1 (0-255): on its own, in a
+class (negated or not), or as a range end. Any other character, such
+as `λ`, `[λ]`, `[^λ]` or `[a-λ]`, is an error,
+`{unencodable_char, CodePoint, latin1, Note}`, where `Note` says to use
+`{encoding, utf8}` (or `utf16`, `utf32`) instead. Named and POSIX
+classes such as `\p{L}` are sets, not characters you write, so they are
+allowed and restricted to 0-255.
 
 **Non-ASCII characters in `bytes` mode.** The lexer reads bytes, so a
 non-ASCII character in a regexp stands for its UTF-8 bytes. They form
@@ -400,10 +410,7 @@ decodes the input and a negated class matches one whole character. In
 `utf8`, `utf16le/be` and `utf32le/be`, `[^é]` matches any character
 except `é`, as all of its bytes and never part of one (see
 [section 4](#4-character-classes)). In `latin1`, every character is one
-byte, so `[^é]` matches any byte except `E9`. (A character above 255
-cannot occur in `latin1` input. On its own, as `λ`, it is an error,
-`{unencodable_char, 955, latin1}`. In a class it is ignored without an
-error, so `[λ]` never matches and `[^λ]` matches any byte.) To lex UTF-8 text with
+byte, so `[^é]` matches any byte except `E9`. To lex UTF-8 text with
 negated classes of non-ASCII characters, use `{encoding, utf8}` rather
 than `bytes`.
 

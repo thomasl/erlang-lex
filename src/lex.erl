@@ -1606,18 +1606,44 @@ internal_form({char_class, Elems}, {bytes, _} = Ctx) ->
 	++ [ lex_unicode:to_regexp(utf8, CharSet) || CharSet =/= [] ],
     flatten_disj(Parts);
 internal_form({char_class, Elems}, {Enc, _} = Ctx) ->
+    check_class_chars(Elems, Enc),
     lower_set(Enc, class_set(Elems, Ctx));
 internal_form({comp_class, Elems}, {Enc, _} = Ctx) ->
+    check_class_chars(Elems, Enc),
     lower_set(Enc, lex_unicode:complement(class_set(Elems, Ctx)));
 internal_form({prop, _Neg, _Name} = Prop, {Enc, _} = Ctx) ->
     lower_set(Enc, class_set([Prop], Ctx));
 internal_form(C, {Enc, _} = Ctx) when is_integer(C) ->
     case Enc =/= bytes andalso lex_unicode:byte_seqs(Enc, [{C, C}]) == [] of
-	true -> exit({unencodable_char, C, Enc});
+	true -> unencodable(C, Enc);
 	false -> lower_set(Enc, elem_set(C, Ctx))
     end;
 internal_form(Other, _Ctx) ->
     exit({regexp_not_handled, Other}).
+
+%% latin1 regexps may only use latin1 characters (0-255): a character
+%% above 255 as a class member or range end is an error, as it is on its
+%% own. (Named and POSIX classes are sets, restricted to 0-255.)
+
+check_class_chars(Elems, latin1) ->
+    [ unencodable(C, latin1)
+      || E <- Elems,
+	 C <- case E of
+		  C0 when is_integer(C0) -> [C0];
+		  {From, To} when is_integer(From), is_integer(To) -> [From, To];
+		  _ -> []
+	      end,
+	 C > 255 ],
+    ok;
+check_class_chars(_Elems, _Enc) ->
+    ok.
+
+unencodable(C, latin1) ->
+    exit({unencodable_char, C, latin1,
+	  "latin1 regexps can only use characters 0-255; "
+	  "use {encoding, utf8} (or utf16, utf32) for others"});
+unencodable(C, Enc) ->
+    exit({unencodable_char, C, Enc}).
 
 lower_set(bytes, Set) ->
     case lex_unicode:intersect(Set, [{?min_char, ?max_char}]) of

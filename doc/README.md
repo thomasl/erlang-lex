@@ -100,7 +100,7 @@ The option `{encoding, Enc}` decides how regexps and input are read:
 | `Enc` | Regexps | Input | Tokens (action argument) |
 |---|---|---|---|
 | `bytes` (default) | bytes; a non-ASCII character in a regexp is its UTF-8 bytes, as a unit | list of 0-255 or binary | bytes |
-| `latin1` | code points 0-255 | Latin-1 bytes | code points |
+| `latin1` | code points 0-255 only (others are an error; use a Unicode encoding) | Latin-1 bytes | code points |
 | `utf8` | code points | UTF-8 ([RFC 3629]) | code points |
 | `utf16be`, `utf16le` | code points | UTF-16 ([RFC 2781]), big or little endian | code points |
 | `utf32be`, `utf32le` | code points | UTF-32, big or little endian | code points |
@@ -642,7 +642,8 @@ Raised (as `exit`) by `regexps_to_table/1,2` and `with/2,3`:
 | `{regexp_not_handled, What}` | valid syntax that is not supported, e.g. `bos`/`eos` for `^`/`$`, `epsilon` for an empty regexp |
 | `{unknown_property, Name}`, `{bad_property_value, Name}` | bad `\p{...}` |
 | `{unknown_posix_class, Name}` | bad `[:name:]` |
-| `{unencodable_char, CodePoint, Enc}` | a literal the encoding cannot represent (a surrogate, or above 255 in `latin1`) |
+| `{unencodable_char, CodePoint, Enc}` | a character the encoding cannot represent, e.g. a surrogate |
+| `{unencodable_char, CodePoint, latin1, Note}` | a character above 255 in a `latin1` regexp, alone, in a class or as a range end; `Note` suggests a Unicode encoding |
 | `{unknown_encoding, Enc}` | bad `{encoding, Enc}` |
 | `{unknown_newline, NL}` | bad `{newline, NL}` |
 | `{unicode_newline_needs_encoding, bytes}` | `{newline, unicode}` with the `bytes` encoding |

@@ -93,8 +93,9 @@ caught(F) ->
 
 any_char_test_() ->
     {timeout, 120,
-     [ fun() -> check_class("[\\x{0}-\\x{10FFFF}]", [{0, 16#10FFFF}], Enc) end
-       || Enc <- [latin1 | ?ENCODINGS] ]}.
+     [ fun() -> check_class("[\\x{0}-\\x{FF}]", [{0, 16#FF}], latin1) end |
+       [ fun() -> check_class("[\\x{0}-\\x{10FFFF}]", [{0, 16#10FFFF}], Enc) end
+         || Enc <- ?ENCODINGS ] ]}.
 
 dot_test_() ->
     {timeout, 120,
@@ -178,7 +179,7 @@ negation_forms_test() ->
 regexp_errors_test() ->
     ?assertMatch({'EXIT', {unknown_property, "Klingon"}}, caught(fun() -> table("\\p{Klingon}", utf8) end)),
     ?assertMatch({'EXIT', {unencodable_char, 16#D800, utf8}}, caught(fun() -> table("\\x{D800}", utf8) end)),
-    ?assertMatch({'EXIT', {unencodable_char, 16#100, latin1}}, caught(fun() -> table("\\x{100}", latin1) end)),
+    ?assertMatch({'EXIT', {unencodable_char, 16#100, latin1, _}}, caught(fun() -> table("\\x{100}", latin1) end)),
     ?assertMatch({'EXIT', {regexp_error, {unterminated, "\\p{"}, _}}, caught(fun() -> table("\\p{L", utf8) end)),
     ?assertMatch({'EXIT', {regexp_error, {illegal, "}"}, _}}, caught(fun() -> table("\\x{110000}", utf8) end)),
     ?assertMatch({'EXIT', {unknown_encoding, utf7}}, caught(fun() -> table("a", utf7) end)).
@@ -530,6 +531,10 @@ driver_rules(Enc) ->
 driver_rules(bytes, At) ->
     [{regexp, "a", At(a)}, {regexp, "a*b", At(ab)}, {regexp, "[c-e]+", At(w)},
      {regexp, "\"[^\"]*\"", At(s)}, {regexp, "[ \n\r]", lex:whitespace()}];
+%% latin1 regexps may only use latin1 characters
+driver_rules(latin1, At) ->
+    [{regexp, "a", At(a)}, {regexp, "a*b", At(ab)}, {regexp, "[c-eéÿ]+", At(w)},
+     {regexp, "\"[^\"]*\"", At(s)}, {regexp, "[ \n\r\\x{85}]", lex:whitespace()}];
 driver_rules(_Enc, At) ->
     [{regexp, "a", At(a)}, {regexp, "a*b", At(ab)}, {regexp, "[c-eλ😀]+", At(w)},
      {regexp, "\"[^\"]*\"", At(s)}, {regexp, "[ \n\r\\x{2028}]", lex:whitespace()}].
@@ -545,7 +550,10 @@ at3(Tag) ->
 %% Random text: mostly characters the rules know, some they do not ('?'),
 %% and for the Unicode encodings, some broken bytes.
 random_input(Enc) ->
-    Chars = "aaab cde\"\n\r?" ++ [16#3BB, 16#1F600, 16#2028],
+    Chars = "aaab cde\"\n\r?" ++ case Enc of
+                                       latin1 -> [233, 255, 16#85];
+                                       _ -> [16#3BB, 16#1F600, 16#2028]
+                                   end,
     N = rand:uniform(30) - 1,
     Text = [ lists:nth(rand:uniform(length(Chars)), Chars) || _ <- lists:seq(1, N) ],
     Bin = case Enc of
@@ -1172,6 +1180,18 @@ bytes_mode_whole_chars_test_() ->
             ?_assertEqual([{t, 1, "x"}, {t, 1, Utf8($é) ++ "x"}], Lex("é?x", "x éx")),
             ?_assertMatch({'EXIT', {error, {non_ascii_in_negated_class, _}}},
                           caught(fun() -> table("[^é]", bytes) end))].
+
+%% latin1 regexps may only use characters 0-255, anywhere in the regexp
+latin1_regexp_chars_test_() ->
+    E = fun(Re) -> caught(fun() -> table(Re, latin1) end) end,
+    [?_assertMatch({lex, _, _, _, _, _, _, _}, table("[^é]", latin1)),
+     ?_assertMatch({lex, _, _, _, _, _, _, _}, table("[a-ÿ]\\p{L}[[:alpha:]]", latin1)),
+     ?_assertMatch({'EXIT', {unencodable_char, 955, latin1, _}}, E("λ")),
+     ?_assertMatch({'EXIT', {unencodable_char, 955, latin1, _}}, E("[λ]")),
+     ?_assertMatch({'EXIT', {unencodable_char, 955, latin1, _}}, E("[^λ]")),
+     ?_assertMatch({'EXIT', {unencodable_char, 955, latin1, _}}, E("[a-λ]")),
+     ?_assertMatch({'EXIT', {unencodable_char, 16#100, latin1, _}}, E("[^\\x{100}]")),
+     ?_assertMatch({'EXIT', {unencodable_char, 955, latin1, _}}, E("(?i)x|[^aλ]+"))].
 
 safe_literal_forms_test_() ->
     Text = "a+(λ)?",
