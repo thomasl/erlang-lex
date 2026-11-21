@@ -92,9 +92,10 @@ Two other settings avoid guessing:
 | `unicode` | code points (Erlang `unicode:chardata()`) | UTF-8 |
 | `latin1` | one character 0-255 per element | one character per byte |
 
-In `bytes` mode the characters are then matched as their UTF-8 bytes
-(see [section 8](#8-bytes-mode-versus-the-unicode-encodings)), except
-with `latin1`, where each character is the byte to match. So
+In `bytes` mode a non-ASCII character then matches its UTF-8 bytes,
+as a whole character (see
+[section 8](#8-bytes-mode-versus-the-unicode-encodings)). With
+`latin1`, each character is instead the byte to match, so
 `{regexp_encoding, latin1}` is the way to write raw bytes in `bytes`
 mode without `\xHH` escapes.
 
@@ -180,6 +181,15 @@ matched in the Unicode encodings, by design.
 In the Unicode encodings, `[^...]` and `.` match any *character* (Unicode
 scalar value) outside the class, never a part of one: in UTF-8 `[^a]`
 matches `λ` as its two bytes `CE BB`, and never a lone `CE`.
+
+In `bytes` mode a class matches one byte, or one whole non-ASCII
+character written literally in it: `[a-zé]` matches a byte `a`-`z` or
+the two bytes of `é`, and `[α-ω]` any Greek small letter as two bytes. A
+range with a non-ASCII end is a range of characters, so its other end
+must also be a character (ASCII, or literal non-ASCII). A byte escape
+above `\x7F` there is an error: `[\x80-λ]`. See
+[section 8](#8-bytes-mode-versus-the-unicode-encodings) for negated
+classes.
 
 ## 5. POSIX classes
 
@@ -354,7 +364,7 @@ The encoding is chosen with `{encoding, Enc}` (default `bytes`); see
 
 | | `bytes` (default) | `latin1` | `utf8`, `utf16le/be`, `utf32le/be` |
 |---|---|---|---|
-| regexp characters | bytes; non-ASCII characters in the regexp are converted to their UTF-8 bytes | code points 0-255 | code points 0-10FFFF |
+| regexp characters | ASCII characters and escapes are bytes; a non-ASCII character is its UTF-8 bytes, as a unit | code points 0-255 | code points 0-10FFFF |
 | `\x{...}` | up to `FF` | up to `10FFFF` (above `FF` is an error) | up to `10FFFF`, no surrogates |
 | `\d \s \w` | DEL, space, `w` | Unicode classes | Unicode classes |
 | `\p{...}` | not available | yes (restricted to 0-255) | yes |
@@ -367,6 +377,25 @@ The encoding is chosen with `{encoding, Enc}` (default `bytes`); see
 
 A literal that the encoding cannot represent is an error:
 `{unencodable_char, CodePoint, Enc}`.
+
+**Non-ASCII characters in `bytes` mode.** The lexer reads bytes, so a
+non-ASCII character in a regexp stands for its UTF-8 bytes. They form
+one unit: a quantifier applies to all of them (`λ+` is `(CE BB)+` and
+matches `λλλ`), and `[λμ]` matches either character. Byte escapes stay
+single bytes (`\xE9+` is one or more bytes `E9`), and with
+`{regexp_encoding, latin1}` every character is one byte. Case folding
+still covers ASCII only. The input is not checked, so a regexp of bytes,
+such as `.` or `\xC3`, can match part of a character.
+
+**Negated classes in `bytes` mode.** A negated class such as `[^é]`
+matches one byte, so it cannot mean "any character but `é`" when `é` is
+two bytes. It could mean "any byte but the first byte of `é`" or "any
+byte but its bytes", but neither is what the regexp says. So a non-ASCII
+character in a negated class is an error,
+`{non_ascii_in_negated_class, Chars}`. ASCII members and byte escapes
+are allowed (`[^a\xE9]`). For "any character but `é`", use
+`{encoding, utf8}`, where `[^é]` matches whole characters. This choice
+may be revisited.
 
 ## 9. Not supported
 

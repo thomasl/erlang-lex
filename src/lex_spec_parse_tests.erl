@@ -94,8 +94,8 @@ regexp_forms_test_() ->
              binary_to_list(<<"λ+"/utf8>>), [binary_to_list(<<"λ"/utf8>>), $+],
              [$λ | <<"+">>]],
     [?_assertEqual({ok, {pclosure, 16#3BB}}, lex_spec_parse:string(F, unicode)) || F <- Forms]
-    %% in bytes mode λ is two bytes, and + applies to the last one
-    ++ [?_assertEqual({ok, {concat, 16#CE, {pclosure, 16#BB}}}, lex_spec_parse:string(F, bytes)) || F <- Forms].
+    %% in bytes mode λ is its two UTF-8 bytes as one unit: (CE BB)+
+    ++ [?_assertEqual({ok, {pclosure, {concat, 16#CE, 16#BB}}}, lex_spec_parse:string(F, bytes)) || F <- Forms].
 
 %% A string literal "é" is [233]: not valid UTF-8 on its own, so it stays
 %% a code point; its UTF-8 bytes [16#C3, 16#A9] give the same character
@@ -124,3 +124,30 @@ regexp_encoding_test_() ->
      ?_assertMatch({error, {bad_characters, _}}, S(<<187>>, bytes, unicode)),
      ?_assertMatch({error, {bad_characters, _}}, S([16#3BB], unicode, latin1)),
      ?_assertError(function_clause, S("a", unicode, utf16))].
+
+%% Bytes mode: a non-ASCII character is its UTF-8 bytes as one unit; an
+%% ASCII character or a byte escape is one byte.
+bytes_mode_whole_chars_test_() ->
+    B = fun(R) -> lex_spec_parse:string(R, bytes) end,
+    [?_assertEqual({ok, {optional, {concat, 16#C3, 16#A9}}}, B("é?")),
+     ?_assertEqual(B("λ+"), B("\\λ+")),
+     ?_assertEqual({ok, {pclosure, 16#E9}}, B("\\xE9+")),
+     ?_assertEqual({ok, {char_class, [{utf8, 955}, {utf8, 956}]}}, B("[λμ]")),
+     ?_assertEqual({ok, {char_class, [{$a, $z}, {utf8, 233}]}}, B("[a-zé]")),
+     ?_assertEqual({ok, {char_class, [{utf8, 945, 969}]}}, B("[α-ω]")),
+     ?_assertEqual({ok, {char_class, [{$A, $C}, {utf8, 955}]}}, B("[\\x41-\\x43λ]")),
+     ?_assertEqual({ok, {char_class, [{utf8, $a, 955}]}}, B("[a-λ]")),
+     ?_assertEqual({ok, {char_class, [16#E9]}}, B("[\\xE9]")),
+     %% a byte escape above 127 is neither a character nor a byte of one
+     ?_assertEqual({error, {char_class, [16#80, $-, 955]}}, B("[\\x80-λ]")),
+     ?_assertEqual({error, {char_class, [955, $-, 945]}}, B("[λ-α]")),
+     %% a negated class matches one byte: no whole characters in it
+     ?_assertEqual({error, {non_ascii_in_negated_class, "é"}}, B("[^é]")),
+     ?_assertEqual({error, {non_ascii_in_negated_class, "é-ë"}}, B("[^a-zé-ë]")),
+     ?_assertEqual({ok, {comp_class, [$a, 16#E9]}}, B("[^a\\xE9]")),
+     %% latin1 regexp encoding: every character is one byte
+     ?_assertEqual({ok, {pclosure, 233}}, lex_spec_parse:string("é+", bytes, latin1)),
+     ?_assertEqual({ok, {comp_class, [233]}}, lex_spec_parse:string("[^é]", bytes, latin1)),
+     %% unicode mode is not affected
+     ?_assertEqual({ok, {comp_class, [233]}}, lex_spec_parse:string("[^é]", unicode)),
+     ?_assert(is_list(lists:flatten(lex_spec_parse:format_error({non_ascii_in_negated_class, "é"}))))].

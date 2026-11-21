@@ -1592,6 +1592,19 @@ internal_form({pclosure, RE}, Ctx) ->
     {seq, [RegExp, {iter, RegExp}]};
 internal_form({caseless, Fold, RE}, {Enc, _Fold}) ->
     internal_form(RE, {Enc, Fold});
+internal_form({char_class, Elems}, {bytes, _} = Ctx) ->
+    %% bytes mode: non-ASCII characters ({utf8, C}, {utf8, From, To}) are
+    %% whole characters, lowered to their UTF-8 byte sequences; the rest
+    %% are bytes. (As in the rest of bytes mode, only ASCII is folded.)
+    IsChar = fun({utf8, _}) -> true; ({utf8, _, _}) -> true; (_) -> false end,
+    {Chars, ByteElems} = lists:partition(IsChar, Elems),
+    CharSet = lex_unicode:normalize([ case E of
+					  {utf8, C} -> {C, C};
+					  {utf8, From, To} -> {From, To}
+				      end || E <- Chars ]),
+    Parts = [ lower_set(bytes, class_set(ByteElems, Ctx)) || ByteElems =/= [] ]
+	++ [ lex_unicode:to_regexp(utf8, CharSet) || CharSet =/= [] ],
+    flatten_disj(Parts);
 internal_form({char_class, Elems}, {Enc, _} = Ctx) ->
     lower_set(Enc, class_set(Elems, Ctx));
 internal_form({comp_class, Elems}, {Enc, _} = Ctx) ->

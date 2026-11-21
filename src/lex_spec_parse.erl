@@ -12,11 +12,16 @@
 %%   class   ::= "[" ["^"] ["]"] item* "]"
 %%   item    ::= "[:" ["^"] name ":]" | single ["-" single]
 %%
-%% There are two modes. In `bytes` mode the regexp is first converted to
-%% UTF-8 and every element is a byte; `\d` `\s` `\w` keep their old AWK
-%% meanings (DEL, space, w) and `\p` is a literal p. In `unicode` mode
-%% every element is a code point, and `\p{..}`, `\P{..}`, `\d` `\s` `\w`
-%% (and complements) are named classes.
+%% There are two modes. In `bytes` mode the regexp matches bytes: an
+%% ASCII character or an escape such as \xHH is one byte, and a non-ASCII
+%% character is its UTF-8 bytes as a unit, so "λ+" is (CE BB)+ and a class
+%% "[λμ]" holds whole characters ({utf8, C} and {utf8, First, Last} items,
+%% which lex lowers to byte sequences). A negated class cannot hold
+%% non-ASCII characters, since it matches one byte. With the latin1 regexp
+%% encoding every character is one byte instead. `\d` `\s` `\w` keep their
+%% old AWK meanings (DEL, space, w) and `\p` is a literal p. In `unicode`
+%% mode every element is a code point, and `\p{..}`, `\P{..}`, `\d` `\s`
+%% `\w` (and complements) are named classes.
 %%
 %% The regexp itself may be a string, a binary or an iolist of both
 %% (unicode:chardata()). How its characters are read is set by the regexp
@@ -42,7 +47,10 @@
 
 -type class_item() :: char()
                     | {First :: char(), Last :: char()}
-                    | named_class().
+                    | named_class()
+                    %% bytes mode: whole non-ASCII characters
+                    | {utf8, char()}
+                    | {utf8, First :: char(), Last :: char()}.
 
 -type regexp() :: char()
                 | epsilon
@@ -63,6 +71,7 @@
                       | {char_class, list()}
                       | {illegal_flags, string()}
                       | {misplaced_flags, string()}
+                      | {non_ascii_in_negated_class, string()}
                       | {bad_characters, unicode:chardata()}.
 
 -define(FAIL(Reason), throw({?MODULE, Reason})).
@@ -89,9 +98,15 @@ string(Regexp, Mode) ->
 string(Regexp, Mode, RegexpEnc)
   when (Mode =:= bytes orelse Mode =:= unicode),
        (RegexpEnc =:= utf8 orelse RegexpEnc =:= unicode orelse RegexpEnc =:= latin1) ->
+    %% internally, bytes mode is utf8_bytes (non-ASCII characters are
+    %% whole UTF-8 characters) or, with the latin1 regexp encoding, bytes
+    ParseMode = case {Mode, RegexpEnc} of
+                    {unicode, _} -> unicode;
+                    {bytes, latin1} -> bytes;
+                    {bytes, _} -> utf8_bytes
+                end,
     try
-        Chars = to_chars(Regexp, Mode, RegexpEnc),
-        {ok, parse(Chars, Mode)}
+        {ok, parse(code_points(Regexp, RegexpEnc), ParseMode)}
     catch
         throw:{?MODULE, Reason} -> {error, Reason}
     end.
@@ -107,6 +122,9 @@ format_error({illegal_flags, What}) ->
     io_lib:format("unsupported flags `(?~ts'; only i and -i are allowed", [What]);
 format_error({misplaced_flags, Hint}) ->
     io_lib:format("misplaced flags: ~ts", [Hint]);
+format_error({non_ascii_in_negated_class, What}) ->
+    io_lib:format("a negated class cannot hold the non-ASCII characters `~ts' in bytes "
+                  "mode, since it matches one byte; use {encoding, utf8}", [What]);
 format_error({bad_characters, What}) ->
     io_lib:format("regexp is not valid character data (a binary must be UTF-8, "
                   "e.g. <<\"...\"/utf8>>): ~tp", [What]).
@@ -129,17 +147,9 @@ format_error({bad_characters, What}) ->
 %%                   character 0..255. In bytes mode these are the bytes
 %%                   to match, not converted to UTF-8.
 %%
-%% Bytes mode then works on the UTF-8 bytes of the characters (except
-%% with latin1), so "é" in a regexp matches the two bytes of an UTF-8 é
-%% in the input.
-
-to_chars(Regexp, Mode, RegexpEnc) ->
-    CodePoints = code_points(Regexp, RegexpEnc),
-    case {Mode, RegexpEnc} of
-        {unicode, _} -> CodePoints;
-        {bytes, latin1} -> CodePoints;
-        {bytes, _} -> binary_to_list(unicode:characters_to_binary(CodePoints))
-    end.
+%% In bytes mode a non-ASCII character then stands for its UTF-8 bytes
+%% (except with latin1), so "é" in a regexp matches the two bytes of an
+%% UTF-8 é in the input.
 
 code_points(Regexp, utf8) ->
     try iolist_to_binary(Regexp) of
@@ -240,14 +250,25 @@ atom("(" ++ Body, Mode) ->
 atom("[" ++ Body, Mode) ->
     class(Body, Mode);
 atom("\\" ++ Escape, Mode) ->
-    escape(Escape, Mode);
+    whole_char(escape(Escape, Mode));
 atom("." ++ Rest, _Mode) -> {{comp_class, "\n"}, Rest};
 atom("^" ++ Rest, _Mode) -> {bos, Rest};
 atom("$" ++ Rest, _Mode) -> {eos, Rest};
 atom([C | _], _Mode) when C =:= $*; C =:= $+; C =:= $?; C =:= $] ->
     ?FAIL({illegal, [C]});
+atom([C | Rest], utf8_bytes) when C >= 128 ->
+    {utf8_seq(C), Rest};
 atom([C | Rest], _Mode) ->
     {C, Rest}.
+
+%% Bytes mode: a non-ASCII character is its UTF-8 bytes in sequence, as
+%% one atom, so that a quantifier after it applies to all of them.
+whole_char({{utf8, C}, Rest}) -> {utf8_seq(C), Rest};
+whole_char(Other) -> Other.
+
+utf8_seq(C) ->
+    [B | Bs] = binary_to_list(unicode:characters_to_binary([C])),
+    lists:foldl(fun(Byte, Seq) -> {concat, Seq, Byte} end, B, Bs).
 
 close_group({RE, ")" ++ Rest}, _Open) -> {RE, Rest};
 close_group({_RE, _Rest}, Open) -> ?FAIL({unterminated, Open}).
@@ -270,6 +291,8 @@ escape([P | Rest], unicode) when P =:= $p; P =:= $P ->
 escape([C | Rest], unicode) when C =:= $d; C =:= $D; C =:= $s; C =:= $S;
                                  C =:= $w; C =:= $W ->
     {perl_class(C), Rest};
+escape([C | Rest], utf8_bytes) when C >= 128 ->
+    {{utf8, C}, Rest};                          % an escaped non-ASCII character
 escape([C | Rest], _Mode) ->
     {control_char(C), Rest};
 escape([], _Mode) ->
@@ -288,6 +311,7 @@ braced_hex(Chars, Mode) ->
     end.
 
 check_max(Value, bytes, _What) when Value =< 16#FF -> Value;
+check_max(Value, utf8_bytes, _What) when Value =< 16#FF -> Value;
 check_max(Value, unicode, _What) when Value =< 16#10FFFF -> Value;
 check_max(_Value, _Mode, What) -> ?FAIL({illegal, What}).
 
@@ -328,7 +352,12 @@ control_char(C) -> C.
 
 class("^" ++ Chars, Mode) ->
     {Items, Rest} = class_items(Chars, Mode),
-    {{comp_class, Items}, Rest};
+    %% bytes mode: a negated class matches one byte, which cannot be "any
+    %% character but é" when é is two bytes
+    case [Item || Item <- Items, is_whole_char(Item)] of
+        [] -> {{comp_class, Items}, Rest};
+        NonAscii -> ?FAIL({non_ascii_in_negated_class, item_chars(NonAscii)})
+    end;
 class(Chars, Mode) ->
     {Items, Rest} = class_items(Chars, Mode),
     {{char_class, Items}, Rest}.
@@ -355,18 +384,48 @@ class_items(Chars, Mode, Acc) ->
 %% "-" is literal at the end and after a named class.
 class_range(Chars, Mode, Acc) ->
     case class_single(Chars, Mode) of
-        {First, [$-, C | After]} when is_integer(First), C =/= $] ->
-            case class_single([C | After], Mode) of
-                {Last, Rest} when is_integer(Last), First < Last ->
-                    class_items(Rest, Mode, [{First, Last} | Acc]);
-                {Last, _Rest} ->
-                    ?FAIL({char_class, [First, $-, Last]})
-            end;
+        {First, [$-, C | After]} when C =/= $], (is_integer(First) orelse
+                                                 element(1, First) =:= utf8) ->
+            {Last, Rest} = class_single([C | After], Mode),
+            class_items(Rest, Mode, [range(First, Last) | Acc]);
         {Item, Rest} ->
             class_items(Rest, Mode, [Item | Acc])
     end.
 
+%% Two bytes (or two code points, in unicode mode) give a range of them.
+%% In bytes mode, if either end is a whole non-ASCII character, the range
+%% is of characters; the other end must then be ASCII (as a byte escape
+%% above 127 would be neither a character nor a byte of one).
+range(First, Last) when is_integer(First), is_integer(Last), First < Last ->
+    {First, Last};
+range(First, Last) when is_integer(First), is_integer(Last) ->
+    ?FAIL({char_class, [First, $-, Last]});
+range(First, Last) ->
+    F = range_char(First), L = range_char(Last),
+    case is_integer(F) andalso is_integer(L) andalso F < L of
+        true -> {utf8, F, L};
+        false -> ?FAIL({char_class, item_chars([First]) ++ "-" ++ item_chars([Last])})
+    end.
+
+range_char({utf8, C}) -> C;
+range_char(C) when is_integer(C), C < 128 -> C;
+range_char(_) -> none.
+
+is_whole_char({utf8, _}) -> true;
+is_whole_char({utf8, _, _}) -> true;
+is_whole_char(_) -> false.
+
+%% The characters of class items, for error messages
+item_chars(Items) ->
+    lists:append([case Item of
+                      {utf8, C} -> [C];
+                      {utf8, F, L} -> [F, $-, L];
+                      C when is_integer(C) -> [C];
+                      _ -> []
+                  end || Item <- Items]).
+
 class_single("\\" ++ Escape, Mode) -> escape(Escape, Mode);
+class_single([C | Rest], utf8_bytes) when C >= 128 -> {{utf8, C}, Rest};
 class_single([C | Rest], _Mode) -> {C, Rest};
 class_single([], _Mode) -> ?FAIL({unterminated, "["}).
 

@@ -99,7 +99,7 @@ The option `{encoding, Enc}` decides how regexps and input are read:
 
 | `Enc` | Regexps | Input | Tokens (action argument) |
 |---|---|---|---|
-| `bytes` (default) | bytes; non-ASCII characters in a regexp are converted to their UTF-8 bytes | list of 0-255 or binary | bytes |
+| `bytes` (default) | bytes; a non-ASCII character in a regexp is its UTF-8 bytes, as a unit | list of 0-255 or binary | bytes |
 | `latin1` | code points 0-255 | Latin-1 bytes | code points |
 | `utf8` | code points | UTF-8 ([RFC 3629]) | code points |
 | `utf16be`, `utf16le` | code points | UTF-16 ([RFC 2781]), big or little endian | code points |
@@ -648,12 +648,14 @@ Raised (as `exit`) by `regexps_to_table/1,2` and `with/2,3`:
 | `{unicode_newline_needs_encoding, bytes}` | `{newline, unicode}` with the `bytes` encoding |
 | `{unknown_table_option, Rep}` | bad `{table, Rep}` |
 | `{unknown_regexp_encoding, E}` | bad `{regexp_encoding, E}` |
+| `{error, {non_ascii_in_negated_class, Chars}}` | bytes mode: a non-ASCII character in a negated class, such as `[^é]` |
 | `{regexp_error, {bad_characters, Regexp}, Regexp}` | a regexp that is not valid character data, e.g. a binary that is not UTF-8 (bytes mode: `{error, {bad_characters, Regexp}}`) |
 | `{table_too_large, States, {binary, Bits}}` | `{table, {binary, Bits}}` with too many states for `Bits`-bit entries |
 
 Syntax errors (`Error` above) include `{illegal, Chars}`,
 `{unterminated, What}`, `{char_class, Range}` (bad range such as
-`z-a`), `{illegal_flags, Chars}` and `{misplaced_flags, Message}`.
+`z-a`), `{illegal_flags, Chars}`, `{misplaced_flags, Message}` and, in
+bytes mode, `{non_ascii_in_negated_class, Chars}`.
 
 ### While lexing
 
@@ -1345,9 +1347,12 @@ Syntax and semantics of the classes:
   tables smaller and possibly faster.
 - **Code generation.** The table holds closures, so it cannot be written
   to a module and loaded later; it is rebuilt at run time.
-- **Bytes mode** keeps some legacy quirks for compatibility: non-ASCII
-  characters in regexps are matched as their UTF-8 bytes, and `\d`/`\s`
-  mean DEL/space.
+- **Bytes mode** keeps a legacy quirk for compatibility: `\d`/`\s` mean
+  DEL/space. A non-ASCII character in a regexp is matched as its UTF-8
+  bytes, as one unit, but a negated class cannot hold one: `[^é]` is an
+  error (`{non_ascii_in_negated_class, Chars}`), since a negated class
+  matches a single byte. Whether to give it a meaning instead is open;
+  see [syntax.md](syntax.md#8-bytes-mode-versus-the-unicode-encodings).
 - **Backtracking** can make lexing quadratic for pathological rule sets,
   see [Lexing corner cases](#lexing-corner-cases).
 

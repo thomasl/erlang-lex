@@ -1150,6 +1150,29 @@ regexp_encoding_option_test_() ->
      ?_assertMatch({'EXIT', {unknown_regexp_encoding, utf16}},
                    W([{regexp, "a", lex:item(e)}], <<"a">>, [{regexp_encoding, utf16}]))].
 
+%% Bytes mode: a non-ASCII character in a regexp is a whole character.
+%% The tables accept exactly the UTF-8 encodings of the class members.
+bytes_mode_whole_chars_test_() ->
+    Utf8 = fun(Cp) -> binary_to_list(unicode:characters_to_binary([Cp])) end,
+    Exact = fun(Re, Members) ->
+                    T = table(Re, bytes),
+                    [?_assertEqual({Re, []}, {Re, [Cp || Cp <- Members, not accepts(T, Utf8(Cp))]}),
+                     ?_assertEqual({Re, length(Members)}, {Re, count_accepted(T)})]
+            end,
+    Lex = fun(Re, Text) -> lex:with([{regexp, Re, lex:item(t)}, {regexp, " ", lex:whitespace()}],
+                                    unicode:characters_to_binary(Text)) end,
+    Exact("[α-ω]", lists:seq($α, $ω))
+        ++ Exact("[a-cé]", [$a, $b, $c, $é])
+        ++ Exact("(?i)[a-cé]", [$a, $b, $c, $A, $B, $C, $é])   % only ASCII folds
+        ++ Exact("[λ😀]", [$λ, 16#1F600])
+        ++ Exact("[a-λ]", lists:seq($a, $λ))
+        ++ [?_assertNot(accepts(table("[α-ω]", bytes), Utf8($Ω))),
+            ?_assertEqual([{t, 1, Utf8($λ) ++ Utf8($λ) ++ Utf8($λ)}], Lex("λ+", "λλλ")),
+            ?_assertEqual([{t, 1, Utf8($α) ++ Utf8($β)}, {t, 1, Utf8($ω)}], Lex("[α-ω]+", "αβ ω")),
+            ?_assertEqual([{t, 1, "x"}, {t, 1, Utf8($é) ++ "x"}], Lex("é?x", "x éx")),
+            ?_assertMatch({'EXIT', {error, {non_ascii_in_negated_class, _}}},
+                          caught(fun() -> table("[^é]", bytes) end))].
+
 safe_literal_forms_test_() ->
     Text = "a+(λ)?",
     Lex = fun(Re) -> lex:with([{regexp, Re, lex:item(t)}], unicode:characters_to_binary(Text),
